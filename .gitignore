@@ -1,0 +1,21 @@
+# Large Media & Binary Test Files
+*.webm
+*.mp4
+*.m4a
+*.zip
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs & Temp files
+*.log
+npm-debug.log*
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Dependencies
+node_modules/

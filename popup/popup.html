@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MaxVideo Pro</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo-area">
+        <img src="../icons/icon-32.png" alt="MaxVideo Logo" class="app-logo">
+        <div>
+          <h1 class="app-title">MaxVideo Pro</h1>
+          <span class="app-tagline">Maximizador de Vídeos & Janela Limpa</span>
+        </div>
+      </div>
+      <div class="status-chip" id="statusChip">
+        <span class="status-dot"></span>
+        <span id="statusText">Buscando vídeos...</span>
+      </div>
+    </header>
+
+    <!-- Main Mode Cards -->
+    <section class="modes-grid">
+      <!-- Clean Window Button (Primary Highlight) -->
+      <button class="mode-card highlight" id="btnCleanWindow">
+        <div class="card-icon clean-icon">
+          <svg viewBox="0 0 24 24"><path d="M19 4H5c-1.11 0-2 .9-2 2v12c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 14H5V8h14v10z"/></svg>
+        </div>
+        <div class="card-content">
+          <div class="card-title-row">
+            <span class="card-title" id="cleanWindowTitle">Janela Limpa</span>
+            <span class="shortcut-tag">Alt + W</span>
+          </div>
+          <p class="card-desc">Oculta abas, URL e barra de favoritos em uma janela livre</p>
+        </div>
+      </button>
+
+      <!-- Maximize in Window -->
+      <button class="mode-card" id="btnMaximize">
+        <div class="card-icon">
+          <svg viewBox="0 0 24 24"><path d="M3 3h8v2H5v6H3V3zm18 0h-8v2h6v6h2V3zM3 21h8v-2H5v-6H3v8zm18 0h-8v-2h6v-6h2v8z"/></svg>
+        </div>
+        <div class="card-content">
+          <div class="card-title-row">
+            <span class="card-title" id="maximizeTitle">Maximizar Vídeo</span>
+            <span class="shortcut-tag">Alt + M</span>
+          </div>
+          <p class="card-desc">Expande o vídeo para ocupar toda a página sem distrações</p>
+        </div>
+      </button>
+
+      <!-- Download Video -->
+      <button class="mode-card download-mode" id="btnDownloadPopup">
+        <div class="card-icon download-icon">
+          <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
+        </div>
+        <div class="card-content">
+          <div class="card-title-row">
+            <span class="card-title">Baixar Vídeo</span>
+            <span class="shortcut-tag">Alt + D</span>
+          </div>
+          <p class="card-desc">Download direto em MP4 ou gravação do player</p>
+        </div>
+      </button>
+
+      <!-- Grid 2-col for Fullscreen and PiP -->
+      <div class="actions-row">
+        <button class="mini-card" id="btnFullscreen">
+          <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+          <div class="mini-text">
+            <span>Tela Cheia</span>
+            <small>Alt + F</small>
+          </div>
+        </button>
+
+        <button class="mini-card" id="btnPip">
+          <svg viewBox="0 0 24 24"><path d="M19 7h-8v6h8V7zm2-4H3c-1.1 0-2 .9-2 2v14c0 1.1.9 1.98 2 1.98h18c1.1 0 2-.88 2-1.98V5c0-1.1-.9-2-2-2zm0 16.01H3V4.98h18v14.03z"/></svg>
+          <div class="mini-text">
+            <span>Picture-in-Picture</span>
+            <small>Alt + P</small>
+          </div>
+        </button>
+      </div>
+    </section>
+
+    <!-- Controls Accordion / Tabs -->
+    <div class="section-tabs">
+      <button class="tab-btn active" id="tabBtnTools">Ferramentas de Vídeo</button>
+      <button class="tab-btn" id="tabBtnSettings">Configurações & Atalhos</button>
+    </div>
+
+    <!-- Tab 1: Video Tools -->
+    <div class="tab-content" id="tabTools">
+      <!-- Aspect Ratio / Proporção -->
+      <div class="control-group">
+        <label class="control-label">Proporção & Zoom</label>
+        <div class="pill-group" id="fitModesGroup">
+          <button class="pill-btn active" data-fit="contain">Ajustar</button>
+          <button class="pill-btn" data-fit="cover">Cortar Barras</button>
+          <button class="pill-btn" data-fit="ultrawide">Ultrawide (21:9)</button>
+          <button class="pill-btn" data-fit="fill">Esticar</button>
+        </div>
+      </div>
+
+      <!-- Playback Speed -->
+      <div class="control-group">
+        <div class="label-row">
+          <label class="control-label">Velocidade de Reprodução</label>
+          <span class="val-display" id="speedDisplay">1.0x</span>
+        </div>
+        <div class="pill-group" id="speedPills">
+          <button class="pill-btn" data-speed="0.75">0.75x</button>
+          <button class="pill-btn active" data-speed="1.0">1.0x</button>
+          <button class="pill-btn" data-speed="1.25">1.25x</button>
+          <button class="pill-btn" data-speed="1.5">1.5x</button>
+          <button class="pill-btn" data-speed="2.0">2.0x</button>
+          <button class="pill-btn" data-speed="2.5">2.5x</button>
+        </div>
+      </div>
+
+      <!-- Audio Boost -->
+      <div class="control-group">
+        <div class="label-row">
+          <label class="control-label">Amplificador de Áudio</label>
+          <span class="val-display" id="boostDisplay">100%</span>
+        </div>
+        <div class="pill-group" id="boostPills">
+          <button class="pill-btn active" data-boost="1.0">100%</button>
+          <button class="pill-btn" data-boost="1.5">150%</button>
+          <button class="pill-btn" data-boost="2.0">200%</button>
+          <button class="pill-btn" data-boost="3.0">300%</button>
+        </div>
+      </div>
+
+      <!-- Video Adjustments -->
+      <div class="control-group">
+        <label class="control-label">Ações & Orientação</label>
+        <div class="btn-group-row">
+          <button class="sub-btn" id="btnSnapshotPopup">
+            <svg viewBox="0 0 24 24"><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/></svg>
+            Capturar Foto
+          </button>
+          <button class="sub-btn" id="btnFlipVideo">
+            <svg viewBox="0 0 24 24"><path d="M15 21h2v-2h-2v2zm4-12h2V7h-2v2zM3 5v14c0 1.1.9 2 2 2h4v-2H5V5h4V3H5c-1.1 0-2 .9-2 2zm16-2v2h2c0-1.1-.9-2-2-2zm-8 20h2V1h-2v22zm8-6h2v-2h-2v2zM15 5h2V3h-2v2zm4 8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2z"/></svg>
+            Espelhar
+          </button>
+          <button class="sub-btn" id="btnRotateVideo">
+            <svg viewBox="0 0 24 24"><path d="M7.11 8.53L5.7 7.11C4.8 8.27 4.24 9.61 4.07 11h2.02c.14-.87.49-1.72 1.02-2.47zM6.09 13H4.07c.17 1.39.72 2.73 1.62 3.89l1.41-1.42c-.52-.75-.87-1.59-1.01-2.47zm1.01 5.32c1.16.9 2.51 1.44 3.9 1.61V17.9c-.87-.15-1.71-.49-2.46-1.03L7.1 18.32zM13 4.07V1L8.45 5.55 13 10V6.09c3.37 0 6.09 2.72 6.09 6.09s-2.72 6.09-6.09 6.09c-.71 0-1.38-.13-2-.36v2.09c.65.17 1.31.27 2 .27 4.42 0 8-3.58 8-8s-3.58-8-8-8z"/></svg>
+            Girar 90°
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Settings & Shortcuts -->
+    <div class="tab-content hidden" id="tabSettings">
+      <div class="settings-list">
+        <label class="setting-item">
+          <div class="setting-text">
+            <span class="setting-title">Botão flutuante sobre os vídeos</span>
+            <span class="setting-desc">Exibe o menu rápido no canto superior do player ao passar o mouse</span>
+          </div>
+          <input type="checkbox" id="chkShowHud" class="toggle-input" checked>
+        </label>
+
+        <label class="setting-item">
+          <div class="setting-text">
+            <span class="setting-title">Memorizar velocidade favorita</span>
+            <span class="setting-desc">Mantém sua velocidade de reprodução escolhida para os próximos vídeos</span>
+          </div>
+          <input type="checkbox" id="chkRememberSpeed" class="toggle-input">
+        </label>
+      </div>
+
+      <div class="shortcuts-card">
+        <span class="shortcuts-header">Atalhos de Teclado</span>
+        <div class="shortcut-row">
+          <span>Alternar Janela Limpa (Sem abas/URL)</span>
+          <kbd>Alt + W</kbd>
+        </div>
+        <div class="shortcut-row">
+          <span>Maximizar / Restaurar Vídeo</span>
+          <kbd>Alt + M</kbd>
+        </div>
+        <div class="shortcut-row">
+          <span>Tela Cheia Imersiva</span>
+          <kbd>Alt + F</kbd>
+        </div>
+        <div class="shortcut-row">
+          <span>Picture-in-Picture</span>
+          <kbd>Alt + P</kbd>
+        </div>
+        <div class="shortcut-row">
+          <span>Baixar Vídeo Ativo</span>
+          <kbd>Alt + D</kbd>
+        </div>
+        <div class="shortcut-row">
+          <span>Alternar Proporção / Zoom</span>
+          <kbd>Alt + Z</kbd>
+        </div>
+        <div class="shortcut-row">
+          <span>Ajustar Velocidade</span>
+          <kbd>[ / ]</kbd>
+        </div>
+        <div class="shortcut-row">
+          <span>Sair do Modo Maximizado</span>
+          <kbd>Esc</kbd>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>MaxVideo Pro v1.0 • Seguro & 100% Local</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Página de Teste - MaxVideo Pro</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      margin: 0;
+      padding: 40px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container {
+      max-width: 900px;
+      width: 100%;
+    }
+    header {
+      margin-bottom: 24px;
+      text-align: center;
+    }
+    h1 {
+      font-size: 28px;
+      margin-bottom: 8px;
+      color: #818cf8;
+    }
+    p {
+      color: #94a3b8;
+      font-size: 15px;
+    }
+    .video-wrapper {
+      position: relative;
+      background: #000;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      margin-bottom: 30px;
+    }
+    video {
+      width: 100%;
+      height: 480px;
+      display: block;
+      background: #000;
+    }
+    .instructions {
+      background: #1e293b;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .instructions h2 {
+      font-size: 18px;
+      margin-top: 0;
+      color: #38bdf8;
+    }
+    .instructions ul {
+      margin: 0;
+      padding-left: 20px;
+      line-height: 1.8;
+      color: #cbd5e1;
+    }
+    kbd {
+      background: #334155;
+      color: #f1f5f9;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 13px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Página de Demonstração — MaxVideo Pro</h1>
+      <p>Use esta página para testar os recursos da extensão localmente.</p>
+    </header>
+
+    <div class="video-wrapper">
+      <!-- Big Buck Bunny open source test video -->
+      <video controls poster="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/images/BigBuckBunny.jpg">
+        <source src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" type="video/mp4">
+        Seu navegador não suporta a tag de vídeo.
+      </video>
+    </div>
+
+    <div class="instructions">
+      <h2>Como testar agora mesmo:</h2>
+      <ul>
+        <li><strong>Baixar Vídeo</strong>: Pressione <kbd>Alt + D</kbd> ou clique no botão de download (📥) na barra flutuante ou no menu da extensão para salvar o arquivo de vídeo diretamente no seu computador!</li>
+        <li><strong>Modo Janela Limpa (Sem abas, URL ou favoritos)</strong>: Pressione <kbd>Alt + W</kbd> ou clique no botão roxo do menu da extensão. Observe que o vídeo abrirá em uma janela desktop sem barras do navegador! Pressione <kbd>Alt + W</kbd> novamente para retornar à aba original.</li>
+        <li><strong>Maximizar na Janela (Viewport Fill)</strong>: Pressione <kbd>Alt + M</kbd> ou passe o mouse sobre o vídeo para ver os botões rápidos no canto superior direito.</li>
+        <li><strong>Tela Cheia Imersiva</strong>: Pressione <kbd>Alt + F</kbd>.</li>
+        <li><strong>Picture-in-Picture</strong>: Pressione <kbd>Alt + P</kbd>.</li>
+        <li><strong>Zoom / Cortar Barras Pretas</strong>: Pressione <kbd>Alt + Z</kbd> repetidamente para alternar os modos de proporção.</li>
+        <li><strong>Velocidade</strong>: Pressione <kbd>[</kbd> para desacelerar e <kbd>]</kbd> para acelerar.</li>
+      </ul>
+    </div>
+  </div>
+</body>
+</html>
