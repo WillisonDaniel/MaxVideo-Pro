@@ -1,4 +1,4 @@
-# 🎬 MaxVideo Pro — Maximizador de Vídeos, Janela Limpa & Ferramentas de Mídia
+# 🎬 MaxVideo Pro — Maximizador de Vídeos, Baixador de Vídeos(Instagram, Twitter, Youtube) & Ferramentas de Mídia
 
 > Uma extensão avançada e ultraleve para navegadores baseados em Chromium (Microsoft Edge, Google Chrome, Brave, Opera) que transforma qualquer reprodutor de vídeo da web em uma experiência imersiva, produtiva e sem distrações.
 
