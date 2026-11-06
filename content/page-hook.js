@@ -88,11 +88,13 @@
     if (url.includes('googlevideo.com/videoplayback')) {
       const clean = stripByteRangeParams(cleanUrl(url));
       let itag = null;
+      let xtags = '';
       try {
         const u = new URL(clean);
         itag = parseInt(u.searchParams.get('itag'), 10);
+        xtags = u.searchParams.get('xtags') || u.searchParams.get('btrack') || '';
       } catch {}
-      reportMedia(clean, 'youtube', { itag });
+      reportMedia(clean, 'youtube', { itag, xtags });
     }
     // 2. Twitter / X: video.twimg.com
     else if (url.includes('video.twimg.com')) {
@@ -332,6 +334,8 @@
   window.addEventListener('MAXVIDEO_REQUEST_YT_INPAGE', () => {
     try {
       let pr = null;
+      let audioTracks = null;
+      let currentAudioTrack = null;
       const moviePlayer = document.getElementById('movie_player');
       if (moviePlayer && typeof moviePlayer.getPlayerResponse === 'function') {
         pr = moviePlayer.getPlayerResponse();
@@ -346,6 +350,13 @@
         } else if (raw) {
           pr = raw;
         }
+      }
+
+      if (moviePlayer && typeof moviePlayer.getAvailableAudioTracks === 'function') {
+        try { audioTracks = moviePlayer.getAvailableAudioTracks(); } catch {}
+      }
+      if (moviePlayer && typeof moviePlayer.getAudioTrack === 'function') {
+        try { currentAudioTrack = moviePlayer.getAudioTrack(); } catch {}
       }
 
       // If no video stream has been sniffed yet, gently trigger playback to buffer streams
@@ -365,6 +376,8 @@
       window.dispatchEvent(new CustomEvent('MAXVIDEO_RESPONSE_YT_INPAGE', {
         detail: {
           playerResponse: pr,
+          audioTracks: audioTracks,
+          currentAudioTrack: currentAudioTrack,
           sniffedMedia: window.__maxvideo_sniffedMedia || []
         }
       }));

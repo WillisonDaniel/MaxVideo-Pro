@@ -300,7 +300,19 @@ async function fetchYouTubeFormats(videoId, inPageData = null) {
       }
     });
     (s.adaptiveFormats || []).forEach((f) => {
-      if (f.url && !allFormats.some((x) => x.url === f.url)) {
+      if (!f.url) return;
+      const isAudio = (f.mimeType || '').startsWith('audio/');
+      const fTrackKey = f.audioTrack ? `${f.audioTrack.id || ''}:${f.audioTrack.displayName || ''}` : '';
+      const isDuplicate = allFormats.some((x) => {
+        if (x.url === f.url) return true;
+        const xIsAudio = (x.mimeType || '').startsWith('audio/');
+        if (isAudio && xIsAudio) {
+          const xTrackKey = x.audioTrack ? `${x.audioTrack.id || ''}:${x.audioTrack.displayName || ''}` : '';
+          return x.itag === f.itag && xTrackKey === fTrackKey;
+        }
+        return false;
+      });
+      if (!isDuplicate) {
         allFormats.push({ ...f, isMuxed: false });
       }
     });
@@ -340,7 +352,19 @@ async function fetchYouTubeFormats(videoId, inPageData = null) {
       }
     });
     (s.adaptiveFormats || []).forEach((f) => {
-      if (f.url && !allFormats.some((x) => x.url === f.url || x.itag === f.itag)) {
+      if (!f.url) return;
+      const isAudio = (f.mimeType || '').startsWith('audio/');
+      const fTrackKey = f.audioTrack ? `${f.audioTrack.id || ''}:${f.audioTrack.displayName || ''}` : '';
+      const isDuplicate = allFormats.some((x) => {
+        if (x.url === f.url) return true;
+        const xIsAudio = (x.mimeType || '').startsWith('audio/');
+        if (isAudio && xIsAudio) {
+          const xTrackKey = x.audioTrack ? `${x.audioTrack.id || ''}:${x.audioTrack.displayName || ''}` : '';
+          return x.itag === f.itag && xTrackKey === fTrackKey;
+        }
+        return !isAudio && !xIsAudio && x.itag === f.itag;
+      });
+      if (!isDuplicate) {
         allFormats.push({ ...f, isMuxed: false, client: clientName });
         count++;
       }
@@ -449,21 +473,76 @@ async function fetchYouTubeFormats(videoId, inPageData = null) {
     muxedUrl = muxedFormats[0].url;
   }
 
-  // Find the best audio track (AAC M4A itag 140 from VISIONOS preferred for pure MP4 container muxing)
+  // Score and identify the original audio track vs auto-dubbed
+  function getAudioTrackScore(f) {
+    let score = 0;
+    const track = f.audioTrack || {};
+    const dispName = (track.displayName || '').toLowerCase();
+    const trackId = (track.id || '').toLowerCase();
+    const urlStr = (f.url || '').toLowerCase();
+
+    const isPt = dispName.includes('portugu') || dispName.includes('brasil') || dispName.includes('brazil') ||
+                 trackId.startsWith('por') || trackId.startsWith('pt') ||
+                 urlStr.includes('btrack%3dpor') || urlStr.includes('btrack%3dpt') || urlStr.includes('btrack:por') || urlStr.includes('btrack:pt');
+
+    const isOriginal = dispName.includes('original') ||
+                       trackId.includes('.main') || trackId.includes('.original') ||
+                       trackId.includes('orig') ||
+                       urlStr.includes('.main') || urlStr.includes('original') ||
+                       (!f.audioTrack);
+
+    const isDubbed = dispName.includes('dub') || dispName.includes('auto-dubbed') || dispName.includes('dublado') || dispName.includes('dublagem') ||
+                     trackId.includes('dubbed') || trackId.includes('dub') ||
+                     urlStr.includes('dubbed');
+
+    // 1. Original em Português (+500)
+    if (isPt && isOriginal) score += 500;
+    // 2. Faixa em Português (+300)
+    else if (isPt) score += 300;
+    // 3. Faixa Original de qualquer idioma (+200)
+    else if (isOriginal && !isDubbed) score += 200;
+
+    // Penalidade para dublagem automática na seleção primária
+    if (isDubbed) score -= 300;
+
+    if (track.audioIsDefault && !isDubbed) score += 50;
+    if (urlStr.includes('c=visionos')) score += 30;
+    if (f.itag === 140) score += 20;
+    else if ((f.mimeType || '').includes('audio/mp4')) score += 10;
+    score += Math.min(20, Math.round((parseInt(f.bitrate || 0, 10)) / 10000));
+    return score;
+  }
+
+  // Find the best audio track (Original PT-BR preferred) and secondary audio (dubbed)
   let bestAudio = null;
+  let secondaryAudio = null;
   if (audioFormats.length > 0) {
-    audioFormats.sort((a, b) => {
-      const aVision = (a.url || '').includes('c=VISIONOS') ? 4 : 0;
-      const bVision = (b.url || '').includes('c=VISIONOS') ? 4 : 0;
-      if (aVision !== bVision) return bVision - aVision;
-      const aAac = a.itag === 140 ? 2 : ((a.mimeType || '').includes('audio/mp4') ? 1 : 0);
-      const bAac = b.itag === 140 ? 2 : ((b.mimeType || '').includes('audio/mp4') ? 1 : 0);
-      if (aAac !== bAac) return bAac - aAac;
-      return (parseInt(b.bitrate || 0, 10)) - (parseInt(a.bitrate || 0, 10));
-    });
+    audioFormats.sort((a, b) => getAudioTrackScore(b) - getAudioTrackScore(a));
     bestAudio = audioFormats[0];
+
+    const bestId = bestAudio.audioTrack?.id || '';
+    const bestName = bestAudio.audioTrack?.displayName || '';
+    const secondaryCandidates = audioFormats.filter((f) => {
+      if (f === bestAudio || f.url === bestAudio.url) return false;
+      const fId = f.audioTrack?.id || '';
+      const fName = f.audioTrack?.displayName || '';
+      if (bestId && fId && bestId === fId) return false;
+      if (bestName && fName && bestName === fName) return false;
+      return true;
+    });
+
+    if (secondaryCandidates.length > 0) {
+      secondaryCandidates.sort((a, b) => {
+        const aAac = a.itag === 140 ? 2 : ((a.mimeType || '').includes('audio/mp4') ? 1 : 0);
+        const bAac = b.itag === 140 ? 2 : ((b.mimeType || '').includes('audio/mp4') ? 1 : 0);
+        if (aAac !== bAac) return bAac - aAac;
+        return (parseInt(b.bitrate || 0, 10)) - (parseInt(a.bitrate || 0, 10));
+      });
+      secondaryAudio = secondaryCandidates[0];
+    }
   }
   const audioSize = bestAudio && bestAudio.contentLength ? parseInt(bestAudio.contentLength, 10) : 0;
+  const secondaryAudioSize = secondaryAudio && secondaryAudio.contentLength ? parseInt(secondaryAudio.contentLength, 10) : 0;
 
   // Collect all unique resolutions from the video streams
   const uniqueHeights = [];
@@ -526,12 +605,17 @@ async function fetchYouTubeFormats(videoId, inPageData = null) {
       qualityTitle = `${best.qualityLabel}`;
     }
 
+    const isDual = Boolean(!isMux && secondaryAudio);
+    const audio1Name = bestAudio?.audioTrack?.displayName || 'Original';
+    const audio2Name = secondaryAudio?.audioTrack?.displayName || 'Dublado';
+    const dualLabel = isDual ? ` • Dual Áudio (${audio1Name} + ${audio2Name})` : '';
+
     results.push({
-      quality: qualityTitle,
+      quality: `${qualityTitle}${dualLabel}`,
       badge: badge,
       recommended: isRec,
       type: isMux ? 'muxed' : 'adaptive_video',
-      size: (best.size || 0) + (isMux ? 0 : audioSize),
+      size: (best.size || 0) + (isMux ? 0 : audioSize) + (isDual ? secondaryAudioSize : 0),
       videoSize: best.size || 0,
       url: best.url,
       itag: best.itag,
@@ -540,6 +624,14 @@ async function fetchYouTubeFormats(videoId, inPageData = null) {
       audioUrl: isMux ? null : (bestAudio ? bestAudio.url : null),
       audioItag: isMux ? null : (bestAudio ? bestAudio.itag : null),
       audioSize: isMux ? 0 : audioSize,
+      audioTrack: bestAudio?.audioTrack || null,
+      audioTrackName: audio1Name,
+      secondaryAudioUrl: isDual ? secondaryAudio.url : null,
+      secondaryAudioItag: isDual ? secondaryAudio.itag : null,
+      secondaryAudioSize: isDual ? secondaryAudioSize : 0,
+      secondaryAudioTrack: isDual ? secondaryAudio.audioTrack : null,
+      secondaryAudioTrackName: isDual ? audio2Name : null,
+      isDualAudio: isDual,
       fallbackMuxedUrl: muxedUrl
     });
   });
@@ -551,14 +643,27 @@ async function fetchYouTubeFormats(videoId, inPageData = null) {
   // Audio format (M4A)
   if (audioFormats.length > 0) {
     const a = bestAudio || audioFormats[0];
+    const origName = a?.audioTrack?.displayName || 'Original (Português)';
     results.push({
-      quality: 'Áudio M4A (Alta Fidelidade)',
+      quality: `Áudio M4A (${origName} - Alta Fidelidade)`,
       badge: 'Áudio M4A',
       type: 'audio',
       size: a.contentLength ? parseInt(a.contentLength, 10) : null,
       url: a.url,
       itag: a.itag
     });
+
+    if (secondaryAudio) {
+      const secName = secondaryAudio?.audioTrack?.displayName || 'Dublagem Secundária';
+      results.push({
+        quality: `Áudio M4A (${secName} - Alta Fidelidade)`,
+        badge: 'Áudio M4A',
+        type: 'audio',
+        size: secondaryAudio.contentLength ? parseInt(secondaryAudio.contentLength, 10) : null,
+        url: secondaryAudio.url,
+        itag: secondaryAudio.itag
+      });
+    }
   }
 
   return { title, formats: results };

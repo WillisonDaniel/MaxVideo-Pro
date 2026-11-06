@@ -603,6 +603,78 @@
     return null;
   }
 
+  function resolveIsoLanguage(trackObj) {
+    if (!trackObj) return 'und';
+    const id = (trackObj.id || '').toLowerCase();
+    const name = (trackObj.displayName || '').toLowerCase();
+    if (id.startsWith('por') || id.startsWith('pt') || name.includes('portugu')) return 'por';
+    if (id.startsWith('eng') || id.startsWith('en') || name.includes('ingl') || name.includes('english')) return 'eng';
+    if (id.startsWith('spa') || id.startsWith('es') || name.includes('espa') || name.includes('spanish')) return 'spa';
+    if (id.startsWith('fra') || id.startsWith('fr') || name.includes('franc') || name.includes('french')) return 'fra';
+    if (id.startsWith('deu') || id.startsWith('de') || name.includes('alem') || name.includes('german')) return 'deu';
+    if (id.startsWith('ita') || id.startsWith('it') || name.includes('ital')) return 'ita';
+    if (id.startsWith('jpn') || id.startsWith('ja') || name.includes('japon') || name.includes('japanese')) return 'jpn';
+    if (id.startsWith('kor') || id.startsWith('ko') || name.includes('corean') || name.includes('korean')) return 'kor';
+    if (id.startsWith('zho') || id.startsWith('zh') || name.includes('chin') || name.includes('chinese')) return 'zho';
+    if (id.startsWith('rus') || id.startsWith('ru') || name.includes('russ')) return 'rus';
+    return 'und';
+  }
+
+  function packIso639Language(langStr) {
+    if (!langStr || typeof langStr !== 'string' || langStr.length < 3) return 0x55c4; // 'und'
+    const s = langStr.toLowerCase().slice(0, 3);
+    const c0 = s.charCodeAt(0) - 0x60;
+    const c1 = s.charCodeAt(1) - 0x60;
+    const c2 = s.charCodeAt(2) - 0x60;
+    if (c0 < 1 || c0 > 26 || c1 < 1 || c1 > 26 || c2 < 1 || c2 > 26) return 0x55c4;
+    return (((c0 & 0x1f) << 10) | ((c1 & 0x1f) << 5) | (c2 & 0x1f)) >>> 0;
+  }
+
+  function getAudioTrackScore(f) {
+    let score = 0;
+    const track = f.audioTrack || {};
+    const dispName = (track.displayName || '').toLowerCase();
+    const trackId = (track.id || '').toLowerCase();
+    const urlStr = (f.url || '').toLowerCase();
+
+    const isPt = dispName.includes('portugu') || dispName.includes('brasil') || dispName.includes('brazil') ||
+                 trackId.startsWith('por') || trackId.startsWith('pt') ||
+                 urlStr.includes('btrack%3dpor') || urlStr.includes('btrack%3dpt') || urlStr.includes('btrack:por') || urlStr.includes('btrack:pt');
+
+    const isOriginal = dispName.includes('original') ||
+                       trackId.includes('.main') || trackId.includes('.original') ||
+                       trackId.includes('orig') ||
+                       urlStr.includes('.main') || urlStr.includes('original') ||
+                       (!f.audioTrack);
+
+    const isDubbed = dispName.includes('dub') || dispName.includes('auto-dubbed') || dispName.includes('dublado') || dispName.includes('dublagem') ||
+                     trackId.includes('dubbed') || trackId.includes('dub') ||
+                     urlStr.includes('dubbed');
+
+    // 1. Original em Português (+500)
+    if (isPt && isOriginal) score += 500;
+    // 2. Faixa em Português (+300)
+    else if (isPt) score += 300;
+    // 3. Faixa Original não-dublada de qualquer idioma (+200)
+    else if (isOriginal && !isDubbed) score += 200;
+
+    // Penalidade drástica para dublagem automática na seleção primária
+    if (isDubbed) score -= 300;
+
+    // Default oficial do player
+    if (track.audioIsDefault && !isDubbed) score += 50;
+
+    // Stream VISIONOS direto sem throttling
+    if (urlStr.includes('c=visionos')) score += 30;
+
+    // AAC itag 140 para MP4
+    if (f.itag === 140) score += 20;
+    else if ((f.mimeType || '').includes('audio/mp4')) score += 10;
+
+    score += Math.min(20, Math.round((parseInt(f.bitrate || 0, 10)) / 10000));
+    return score;
+  }
+
   function parseYouTubeFormats(streamingData, videoDetails = {}) {
     const allFormats = [];
     const title = videoDetails.title || 'YouTube Video';
@@ -615,7 +687,19 @@
     });
 
     (s.adaptiveFormats || []).forEach((f) => {
-      if (f.url && !allFormats.some((x) => x.url === f.url)) {
+      if (!f.url) return;
+      const isAudio = (f.mimeType || '').startsWith('audio/');
+      const fTrackKey = f.audioTrack ? `${f.audioTrack.id || ''}:${f.audioTrack.displayName || ''}` : '';
+      const isDuplicate = allFormats.some((x) => {
+        if (x.url === f.url) return true;
+        const xIsAudio = (x.mimeType || '').startsWith('audio/');
+        if (isAudio && xIsAudio) {
+          const xTrackKey = x.audioTrack ? `${x.audioTrack.id || ''}:${x.audioTrack.displayName || ''}` : '';
+          return x.itag === f.itag && xTrackKey === fTrackKey;
+        }
+        return false;
+      });
+      if (!isDuplicate) {
         allFormats.push({ ...f, isMuxed: false });
       }
     });
@@ -660,23 +744,40 @@
       muxedUrl = muxedFormats[0].url;
     }
 
-    // Find the best audio track (AAC M4A itag 140 from VISIONOS preferred for pure MP4 container muxing)
+    // Identifica e prioriza a faixa de áudio original / pt-BR como primária (default)
     let bestAudio = null;
+    let secondaryAudio = null;
     if (audioFormats.length > 0) {
-      audioFormats.sort((a, b) => {
-        const aVision = (a.url || '').includes('c=VISIONOS') ? 4 : 0;
-        const bVision = (b.url || '').includes('c=VISIONOS') ? 4 : 0;
-        if (aVision !== bVision) return bVision - aVision;
-        const aAac = a.itag === 140 ? 2 : ((a.mimeType || '').includes('audio/mp4') ? 1 : 0);
-        const bAac = b.itag === 140 ? 2 : ((b.mimeType || '').includes('audio/mp4') ? 1 : 0);
-        if (aAac !== bAac) return bAac - aAac;
-        return (parseInt(b.bitrate || 0, 10)) - (parseInt(a.bitrate || 0, 10));
-      });
+      audioFormats.sort((a, b) => getAudioTrackScore(b) - getAudioTrackScore(a));
       bestAudio = audioFormats[0];
-    }
-    const audioSize = bestAudio && bestAudio.contentLength ? parseInt(bestAudio.contentLength, 10) : 0;
 
-    // Collect all unique resolutions from the video streams
+      // Faixa secundária para Dual Áudio (ex: dublagem em inglês ou idioma alternativo)
+      const bestId = bestAudio.audioTrack?.id || '';
+      const bestName = bestAudio.audioTrack?.displayName || '';
+      const secondaryCandidates = audioFormats.filter((f) => {
+        if (f === bestAudio || f.url === bestAudio.url) return false;
+        const fId = f.audioTrack?.id || '';
+        const fName = f.audioTrack?.displayName || '';
+        if (bestId && fId && bestId === fId) return false;
+        if (bestName && fName && bestName === fName) return false;
+        return true;
+      });
+
+      if (secondaryCandidates.length > 0) {
+        secondaryCandidates.sort((a, b) => {
+          const aAac = a.itag === 140 ? 2 : ((a.mimeType || '').includes('audio/mp4') ? 1 : 0);
+          const bAac = b.itag === 140 ? 2 : ((b.mimeType || '').includes('audio/mp4') ? 1 : 0);
+          if (aAac !== bAac) return bAac - aAac;
+          return (parseInt(b.bitrate || 0, 10)) - (parseInt(a.bitrate || 0, 10));
+        });
+        secondaryAudio = secondaryCandidates[0];
+      }
+    }
+
+    const audioSize = bestAudio && bestAudio.contentLength ? parseInt(bestAudio.contentLength, 10) : 0;
+    const secondaryAudioSize = secondaryAudio && secondaryAudio.contentLength ? parseInt(secondaryAudio.contentLength, 10) : 0;
+
+    // Coleta todas as resoluções únicas dos fluxos de vídeo
     const uniqueHeights = [];
     parsedVideos.forEach((v) => {
       if (v.resNum && v.resNum >= 144 && !uniqueHeights.includes(v.resNum)) {
@@ -692,7 +793,6 @@
       const candidates = parsedVideos.filter((v) => v.resNum === height);
       if (candidates.length === 0) return;
 
-      // Prefer VISIONOS unthrottled formats, then MP4 candidates so in-browser fMP4 muxer works natively
       const best = candidates.find((c) => (c.url || '').includes('c=VISIONOS') && c.isMp4) ||
         candidates.find((c) => (c.url || '').includes('c=VISIONOS')) ||
         candidates.find((c) => c.isMp4) ||
@@ -737,12 +837,17 @@
         qualityTitle = `${best.qualityLabel}`;
       }
 
+      const isDual = Boolean(!isMux && secondaryAudio);
+      const audio1Name = bestAudio?.audioTrack?.displayName || 'Original';
+      const audio2Name = secondaryAudio?.audioTrack?.displayName || 'Dublado';
+      const dualLabel = isDual ? ` • Dual Áudio (${audio1Name} + ${audio2Name})` : '';
+
       results.push({
-        quality: qualityTitle,
+        quality: `${qualityTitle}${dualLabel}`,
         badge: badge,
         recommended: isRec,
         type: isMux ? 'muxed' : 'adaptive_video',
-        size: (best.size || 0) + (isMux ? 0 : audioSize),
+        size: (best.size || 0) + (isMux ? 0 : audioSize) + (isDual ? secondaryAudioSize : 0),
         videoSize: best.size || 0,
         url: best.url,
         itag: best.itag,
@@ -751,6 +856,14 @@
         audioUrl: isMux ? null : (bestAudio ? bestAudio.url : null),
         audioItag: isMux ? null : (bestAudio ? bestAudio.itag : null),
         audioSize: isMux ? 0 : audioSize,
+        audioTrack: bestAudio?.audioTrack || null,
+        audioTrackName: audio1Name,
+        secondaryAudioUrl: isDual ? secondaryAudio.url : null,
+        secondaryAudioItag: isDual ? secondaryAudio.itag : null,
+        secondaryAudioSize: isDual ? secondaryAudioSize : 0,
+        secondaryAudioTrack: isDual ? secondaryAudio.audioTrack : null,
+        secondaryAudioTrackName: isDual ? audio2Name : null,
+        isDualAudio: isDual,
         fallbackMuxedUrl: muxedUrl
       });
     });
@@ -759,17 +872,30 @@
       results[0].recommended = true;
     }
 
-    // Audio format (M4A)
+    // Formatos de áudio puro (M4A)
     if (audioFormats.length > 0) {
       const a = bestAudio || audioFormats[0];
+      const origName = a?.audioTrack?.displayName || 'Original (Português)';
       results.push({
-        quality: 'Áudio M4A (Música em Alta Fidelidade)',
+        quality: `Áudio M4A (${origName} - Alta Fidelidade)`,
         badge: 'Áudio M4A',
         type: 'audio',
         size: a.contentLength ? parseInt(a.contentLength, 10) : null,
         url: a.url,
         itag: a.itag
       });
+
+      if (secondaryAudio) {
+        const secName = secondaryAudio?.audioTrack?.displayName || 'Dublagem Secundária';
+        results.push({
+          quality: `Áudio M4A (${secName} - Alta Fidelidade)`,
+          badge: 'Áudio M4A',
+          type: 'audio',
+          size: secondaryAudio.contentLength ? parseInt(secondaryAudio.contentLength, 10) : null,
+          url: secondaryAudio.url,
+          itag: secondaryAudio.itag
+        });
+      }
     }
 
     return { title, formats: results };
@@ -1407,7 +1533,7 @@
   // into a 100% compliant, standard non-fragmented MP4 (ftyp + mdat + moov)
   // Guaranteed smooth playback & instant seeking in VLC, Windows Media, QuickTime, TVs, etc.
   // -------------------------------------------------------------
-  function muxToStandardMp4(videoU8, audioU8, formatInfo) {
+  function muxToStandardMp4(videoU8, audioU8, formatInfo, secondaryAudioU8 = null) {
     const u32 = (b, o) => ((b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]) >>> 0);
     const i32 = (b, o) => ((b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]));
     const u16 = (b, o) => ((b[o] << 8 | b[o + 1]) >>> 0);
@@ -1499,6 +1625,30 @@
     if (aMdhdBox) {
       const ver = audioU8[aMdhdBox.off + 8];
       aTimescale = u32(audioU8, aMdhdBox.off + (ver === 1 ? 28 : 20)) || 44100;
+    }
+
+    // Processamento opcional da segunda faixa de áudio (Dual Áudio / Dublagem)
+    let a2Stsd = null;
+    let a2Timescale = 44100;
+    let secondaryAudioMoovBox = null;
+    if (secondaryAudioU8 && secondaryAudioU8.length > 0) {
+      try {
+        secondaryAudioMoovBox = findBox(secondaryAudioU8, 'moov');
+        if (secondaryAudioMoovBox) {
+          const a2StsdBox = findBoxRecursive(secondaryAudioU8, 'stsd', secondaryAudioMoovBox.off, secondaryAudioMoovBox.end);
+          if (a2StsdBox) {
+            a2Stsd = secondaryAudioU8.subarray(a2StsdBox.off, a2StsdBox.end);
+          }
+          const a2MdhdBox = findBoxRecursive(secondaryAudioU8, 'mdhd', secondaryAudioMoovBox.off, secondaryAudioMoovBox.end);
+          if (a2MdhdBox) {
+            const ver = secondaryAudioU8[a2MdhdBox.off + 8];
+            a2Timescale = u32(secondaryAudioU8, a2MdhdBox.off + (ver === 1 ? 28 : 20)) || 44100;
+          }
+        }
+      } catch (e2) {
+        console.warn('Erro ao processar cabeçalhos da segunda faixa de áudio:', e2);
+        secondaryAudioMoovBox = null;
+      }
     }
 
     let width = formatInfo?.width || 1920;
@@ -1599,26 +1749,30 @@
 
     const videoSamples = parseTrackFragments(videoU8, vMoovBox.end, true);
     const audioSamples = parseTrackFragments(audioU8, aMoovBox.end, false);
+    const secondaryAudioSamples = (secondaryAudioMoovBox && a2Stsd) ? parseTrackFragments(secondaryAudioU8, secondaryAudioMoovBox.end, false) : [];
 
     if (videoSamples.length === 0 || audioSamples.length === 0) {
       throw new Error('Nenhum fragmento de vídeo ou áudio encontrado para conversão');
     }
 
-    // Intercala blocos de 1 segundo de vídeo e áudio em sincronia temporal
+    // Intercala blocos de 1 segundo de vídeo e faixas de áudio em sincronia temporal
     const CHUNK_DURATION_SEC = 1.0;
     const vChunkTicks = vTimescale * CHUNK_DURATION_SEC;
     const aChunkTicks = aTimescale * CHUNK_DURATION_SEC;
+    const a2ChunkTicks = a2Timescale * CHUNK_DURATION_SEC;
 
     const mdatParts = [];
     let mdatTotalPayload = 0;
 
     const vChunks = [];
     const aChunks = [];
+    const a2Chunks = [];
 
     let vIdx = 0;
     let aIdx = 0;
+    let a2Idx = 0;
 
-    while (vIdx < videoSamples.length || aIdx < audioSamples.length) {
+    while (vIdx < videoSamples.length || aIdx < audioSamples.length || (secondaryAudioSamples.length > 0 && a2Idx < secondaryAudioSamples.length)) {
       if (vIdx < videoSamples.length) {
         const startV = vIdx;
         const dtsStart = videoSamples[startV].dts;
@@ -1658,6 +1812,26 @@
         }
         mdatTotalPayload += chunkSz;
       }
+
+      if (secondaryAudioSamples.length > 0 && a2Idx < secondaryAudioSamples.length) {
+        const startA2 = a2Idx;
+        const dtsStart = secondaryAudioSamples[startA2].dts;
+        let chunkSz = 0;
+        while (a2Idx < secondaryAudioSamples.length && (secondaryAudioSamples[a2Idx].dts - dtsStart < a2ChunkTicks || a2Idx === startA2)) {
+          chunkSz += secondaryAudioSamples[a2Idx].sz;
+          a2Idx++;
+        }
+        a2Chunks.push({
+          startSample: startA2,
+          count: a2Idx - startA2,
+          chunkOffset: 0,
+          size: chunkSz
+        });
+        for (let i = startA2; i < a2Idx; i++) {
+          mdatParts.push(secondaryAudioSamples[i].buf);
+        }
+        mdatTotalPayload += chunkSz;
+      }
     }
 
     const ftypHead = new Uint8Array([
@@ -1687,8 +1861,8 @@
     }
 
     let currentFileOffset = ftypHead.length + mdatHead.length;
-    let vC = 0, aC = 0;
-    while (vC < vChunks.length || aC < aChunks.length) {
+    let vC = 0, aC = 0, a2C = 0;
+    while (vC < vChunks.length || aC < aChunks.length || a2C < a2Chunks.length) {
       if (vC < vChunks.length) {
         vChunks[vC].chunkOffset = currentFileOffset;
         currentFileOffset += vChunks[vC].size;
@@ -1698,6 +1872,11 @@
         aChunks[aC].chunkOffset = currentFileOffset;
         currentFileOffset += aChunks[aC].size;
         aC++;
+      }
+      if (a2C < a2Chunks.length) {
+        a2Chunks[a2C].chunkOffset = currentFileOffset;
+        currentFileOffset += a2Chunks[a2C].size;
+        a2C++;
       }
     }
 
@@ -1822,16 +2001,17 @@
       return makeBox('stbl', concatU8(stblParts));
     }
 
-    function buildTrak(trackId, isAudio, samples, chunks, stsdU8, movieTimescale, trackTimescale, w, h) {
+    function buildTrak(trackId, isAudio, samples, chunks, stsdU8, movieTimescale, trackTimescale, w, h, isDefaultAudio = false, alternateGroup = 0, langCode = 0x55c4) {
       let trackDur = 0;
       for (let i = 0; i < samples.length; i++) trackDur += samples[i].dur;
       const movieDur = Math.round((trackDur / trackTimescale) * movieTimescale);
 
       const tkhdBuf = new Uint8Array(84);
-      setU32(tkhdBuf, 0, 0x00000003);
+      setU32(tkhdBuf, 0, 0x00000003); // enabled | in_movie
       setU32(tkhdBuf, 12, trackId);
       setU32(tkhdBuf, 20, movieDur);
-      setU16(tkhdBuf, 36, isAudio ? 0x0100 : 0x0000);
+      setU16(tkhdBuf, 34, alternateGroup || 0); // alternate_group
+      setU16(tkhdBuf, 36, isAudio ? (isDefaultAudio ? 0x0100 : 0x0000) : 0x0000); // volume
       setU32(tkhdBuf, 40, 0x00010000);
       setU32(tkhdBuf, 56, 0x00010000);
       setU32(tkhdBuf, 72, 0x40000000);
@@ -1843,7 +2023,7 @@
       setU32(mdhdBuf, 0, 0);
       setU32(mdhdBuf, 12, trackTimescale);
       setU32(mdhdBuf, 16, trackDur);
-      setU16(mdhdBuf, 20, 0x55c4);
+      setU16(mdhdBuf, 20, langCode || 0x55c4);
       const mdhd = makeBox('mdhd', mdhdBuf);
 
       const hdlrBuf = new Uint8Array(24);
@@ -1874,17 +2054,27 @@
     }
 
     const MOVIE_TIMESCALE = 60000;
-    const vTrak = buildTrak(1, false, videoSamples, vChunks, vStsd, MOVIE_TIMESCALE, vTimescale, width, height);
-    const aTrak = buildTrak(2, true, audioSamples, aChunks, aStsd, MOVIE_TIMESCALE, aTimescale, 0, 0);
+    const langCode1 = packIso639Language(resolveIsoLanguage(formatInfo?.audioTrack));
+    const langCode2 = packIso639Language(resolveIsoLanguage(formatInfo?.secondaryAudioTrack));
+    const hasDual = Boolean(secondaryAudioSamples.length > 0 && a2Stsd);
+
+    const vTrak = buildTrak(1, false, videoSamples, vChunks, vStsd, MOVIE_TIMESCALE, vTimescale, width, height, false, 0, 0x55c4);
+    // Faixa 2: Áudio Original (Padrão, volume 1.0, default ativo)
+    const aTrak = buildTrak(2, true, audioSamples, aChunks, aStsd, MOVIE_TIMESCALE, aTimescale, 0, 0, true, hasDual ? 1 : 0, langCode1);
+    // Faixa 3: Áudio Secundário / Dublado (volume 0.0, alternate_group 1 para troca pelo player)
+    const a2Trak = hasDual ? buildTrak(3, true, secondaryAudioSamples, a2Chunks, a2Stsd, MOVIE_TIMESCALE, a2Timescale, 0, 0, false, 1, langCode2) : null;
 
     let vTotalDur = 0;
     for (let i = 0; i < videoSamples.length; i++) vTotalDur += videoSamples[i].dur;
     let aTotalDur = 0;
     for (let i = 0; i < audioSamples.length; i++) aTotalDur += audioSamples[i].dur;
+    let a2TotalDur = 0;
+    for (let i = 0; i < secondaryAudioSamples.length; i++) a2TotalDur += secondaryAudioSamples[i].dur;
 
     const totalMovieDur = Math.max(
       Math.round((vTotalDur / vTimescale) * MOVIE_TIMESCALE),
-      Math.round((aTotalDur / aTimescale) * MOVIE_TIMESCALE)
+      Math.round((aTotalDur / aTimescale) * MOVIE_TIMESCALE),
+      hasDual ? Math.round((a2TotalDur / a2Timescale) * MOVIE_TIMESCALE) : 0
     );
 
     const mvhdBuf = new Uint8Array(100);
@@ -1896,10 +2086,13 @@
     setU32(mvhdBuf, 36, 0x00010000);
     setU32(mvhdBuf, 52, 0x00010000);
     setU32(mvhdBuf, 72, 0x40000000);
-    setU32(mvhdBuf, 96, 3);
+    setU32(mvhdBuf, 96, hasDual ? 4 : 3);
     const mvhd = makeBox('mvhd', mvhdBuf);
 
-    const moov = makeBox('moov', concatU8([mvhd, vTrak, aTrak]));
+    const traks = [vTrak, aTrak];
+    if (a2Trak) traks.push(a2Trak);
+
+    const moov = makeBox('moov', concatU8([mvhd, ...traks]));
 
     const finalParts = [ftypHead, mdatHead];
     for (let i = 0; i < mdatParts.length; i++) {
@@ -2056,7 +2249,9 @@
     const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB high-speed chunks
     const totalVideoBytes = format.videoSize || format.size || 0;
     const totalAudioBytes = hasAudioTrack ? (format.audioSize || 0) : 0;
-    const combinedTotal = totalVideoBytes + totalAudioBytes;
+    const hasSecondaryAudio = Boolean(format.isDualAudio && format.secondaryAudioUrl);
+    const totalSecondaryAudioBytes = hasSecondaryAudio ? (format.secondaryAudioSize || 0) : 0;
+    const combinedTotal = totalVideoBytes + totalAudioBytes + totalSecondaryAudioBytes;
 
     // Helper to fetch a stream in chunks
     async function fetchStreamBytes(streamUrl, streamSize, streamName, progressOffset, progressScale) {
@@ -2190,25 +2385,44 @@
 
     try {
       modal.setStatus(`Baixando vídeo ${format.badge}...`);
-      // Phase 1: Video stream (0% -> 85%)
-      let videoU8 = await fetchStreamBytes(format.url, totalVideoBytes, format.badge || 'Vídeo em Alta Definição', 0, 85);
+      // Phase 1: Video stream
+      const videoScale = hasSecondaryAudio ? 75 : 85;
+      let videoU8 = await fetchStreamBytes(format.url, totalVideoBytes, format.badge || 'Vídeo em Alta Definição', 0, videoScale);
       if (isAborted || !videoU8) return;
 
       let finalBlob = null;
 
       if (hasAudioTrack && format.audioUrl) {
-        // Phase 2: Audio stream (85% -> 95%)
-        modal.setStatus(`Baixando áudio em alta fidelidade...`);
-        let audioU8 = await fetchStreamBytes(format.audioUrl, totalAudioBytes, 'Áudio M4A', 85, 10);
+        // Phase 2a: Primary Audio stream (Original - Português)
+        const audio1Name = format.audioTrackName ? `Áudio (${format.audioTrackName})` : 'Áudio Original M4A';
+        const audio1Scale = hasSecondaryAudio ? 12 : 10;
+        modal.setStatus(`Baixando ${audio1Name}...`);
+        let audioU8 = await fetchStreamBytes(format.audioUrl, totalAudioBytes, audio1Name, videoScale, audio1Scale);
         if (isAborted || !audioU8) return;
+
+        // Phase 2b: Secondary Audio stream (Dual Áudio / Dublagem)
+        let secondaryAudioU8 = null;
+        if (hasSecondaryAudio && format.secondaryAudioUrl) {
+          try {
+            const audio2Name = format.secondaryAudioTrackName ? `Áudio Secundário (${format.secondaryAudioTrackName})` : 'Áudio Secundário M4A';
+            modal.setStatus(`Baixando faixa secundária: ${audio2Name}...`);
+            secondaryAudioU8 = await fetchStreamBytes(format.secondaryAudioUrl, totalSecondaryAudioBytes, audio2Name, videoScale + audio1Scale, 8);
+          } catch (secErr) {
+            console.warn('Erro ao transferir faixa secundária de áudio, prosseguindo com áudio primário:', secErr);
+            secondaryAudioU8 = null;
+          }
+        }
 
         // Phase 3: Muxing (95% -> 99%)
         modal.setProgress(98, combinedTotal, combinedTotal);
-        modal.setStatus(`⚡ Fundindo vídeo ${format.badge} e áudio em arquivo MP4 único...`);
+        const muxStatus = secondaryAudioU8 ?
+          `⚡ Fundindo vídeo e Dual Áudio (Original + Dublagem) em arquivo MP4 único...` :
+          `⚡ Fundindo vídeo ${format.badge} e áudio original em arquivo MP4 único...`;
+        modal.setStatus(muxStatus);
         await new Promise((r) => setTimeout(r, 80));
 
         try {
-          finalBlob = muxToStandardMp4(videoU8, audioU8, format);
+          finalBlob = muxToStandardMp4(videoU8, audioU8, format, secondaryAudioU8);
         } catch (muxErr) {
           console.warn('In-browser MP4 multiplexing exception, falling back to video-only blob:', muxErr);
           finalBlob = new Blob([videoU8], { type: 'video/mp4' });
@@ -2216,6 +2430,7 @@
         // Desaloca imediatamente os buffers grandes de vídeo e áudio da memória heap
         videoU8 = null;
         audioU8 = null;
+        secondaryAudioU8 = null;
       } else {
         const mime = format.type === 'audio' ? 'audio/mp4' : 'video/mp4';
         finalBlob = new Blob([videoU8], { type: mime });
@@ -2225,7 +2440,10 @@
       modal.setProgress(100, combinedTotal, combinedTotal);
       modal.setStatus('Salvando arquivo final em Downloads...');
       saveBlobAsFile(finalBlob, filename);
-      modal.finishSuccess(`✅ Download de ${format.badge} com áudio concluído! Salvo em Downloads.`);
+      const successMsg = format.isDualAudio ?
+        `✅ Download de ${format.badge} concluído com sucesso em Dual Áudio (Original Padrão)!` :
+        `✅ Download de ${format.badge} com áudio original concluído! Salvo em Downloads.`;
+      modal.finishSuccess(successMsg);
     } catch (err) {
       if (isAborted) return;
       console.error('Download error:', err);
@@ -2268,7 +2486,19 @@
         }
       });
       (s.adaptiveFormats || []).forEach((f) => {
-        if (f.url && !allFormats.some((x) => x.url === f.url || x.itag === f.itag)) {
+        if (!f.url) return;
+        const isAudio = (f.mimeType || '').startsWith('audio/');
+        const fTrackKey = f.audioTrack ? `${f.audioTrack.id || ''}:${f.audioTrack.displayName || ''}` : '';
+        const isDuplicate = allFormats.some((x) => {
+          if (x.url === f.url) return true;
+          const xIsAudio = (x.mimeType || '').startsWith('audio/');
+          if (isAudio && xIsAudio) {
+            const xTrackKey = x.audioTrack ? `${x.audioTrack.id || ''}:${x.audioTrack.displayName || ''}` : '';
+            return x.itag === f.itag && xTrackKey === fTrackKey;
+          }
+          return !isAudio && !xIsAudio && x.itag === f.itag;
+        });
+        if (!isDuplicate) {
           allFormats.push({ ...f, isMuxed: false, client: clientName });
           count++;
         }
@@ -2371,6 +2601,24 @@
     return parseYouTubeFormats(streamingData, { title });
   }
 
+  function scoreAudioUrl(urlStr) {
+    try {
+      const u = new URL(urlStr);
+      const xtags = decodeURIComponent(u.searchParams.get('xtags') || '');
+      const btrack = decodeURIComponent(u.searchParams.get('btrack') || '');
+      const all = `${xtags} ${btrack} ${urlStr}`.toLowerCase();
+      let score = 0;
+      const itag = parseInt(u.searchParams.get('itag'), 10);
+      if (itag === 140) score += 30;
+      if (all.includes('main') || all.includes('original')) score += 200;
+      if (all.includes('por') || all.includes('pt') || all.includes('bra')) score += 300;
+      if (all.includes('dub') || all.includes('auto-dub') || all.includes('dublado')) score -= 250;
+      return score;
+    } catch {
+      return 0;
+    }
+  }
+
   // Sniffed media fallback for YouTube (Full aitags expansion & live playback stream extractor)
   function getSniffedYouTubeFormats(title) {
     const ytItems = sniffedMedia.filter((m) => m.platform === 'youtube' && m.url && m.url.includes('googlevideo.com/videoplayback'));
@@ -2379,10 +2627,13 @@
     let aitagsVideoUrl = null;
     let sniffedAudioUrl = null;
     let sniffedAudioItag = 140;
+    let sniffedSecondaryAudioUrl = null;
+    let sniffedSecondaryAudioItag = 140;
     let videoDuration = 0;
 
     // Direct streams by itag that were explicitly sniffed
     const directStreamsByItag = new Map();
+    const audioCandidates = [];
 
     ytItems.forEach((item) => {
       try {
@@ -2392,12 +2643,15 @@
         const dur = parseFloat(u.searchParams.get('dur') || '0');
         if (dur > videoDuration) videoDuration = dur;
 
-        const isAudio = mime.startsWith('audio/') || itag === 140 || itag === 251;
+        const isAudio = mime.startsWith('audio/') || itag === 140 || itag === 251 || itag === 249 || itag === 250;
         if (isAudio) {
-          if (!sniffedAudioUrl || itag === 140) {
-            sniffedAudioUrl = item.url;
-            sniffedAudioItag = itag;
-          }
+          const score = scoreAudioUrl(item.url);
+          audioCandidates.push({
+            url: item.url,
+            itag: itag,
+            score: score,
+            xtags: item.xtags || u.searchParams.get('xtags') || ''
+          });
         } else {
           if (itag) {
             directStreamsByItag.set(itag, item.url);
@@ -2408,6 +2662,18 @@
         }
       } catch {}
     });
+
+    if (audioCandidates.length > 0) {
+      audioCandidates.sort((a, b) => b.score - a.score);
+      sniffedAudioUrl = audioCandidates[0].url;
+      sniffedAudioItag = audioCandidates[0].itag;
+
+      const secAudio = audioCandidates.find((c) => c.url !== sniffedAudioUrl && (c.score < audioCandidates[0].score || c.itag !== sniffedAudioItag));
+      if (secAudio) {
+        sniffedSecondaryAudioUrl = secAudio.url;
+        sniffedSecondaryAudioItag = secAudio.itag;
+      }
+    }
 
     const itagMeta = {
       // 4K Ultra HD
@@ -2483,10 +2749,12 @@
           }
 
           const vSize = (videoDuration > 0 && meta.bps) ? Math.round((videoDuration * meta.bps) / 8) : 0;
-          const totalEstSize = vSize + (meta.isMuxed ? 0 : audioSize);
+          const isDual = Boolean(!meta.isMuxed && sniffedSecondaryAudioUrl);
+          const totalEstSize = vSize + (meta.isMuxed ? 0 : audioSize) + (isDual ? audioSize : 0);
+          const dualLabel = isDual ? ' • Dual Áudio' : '';
 
           results.push({
-            quality: meta.quality,
+            quality: `${meta.quality}${dualLabel}`,
             badge: meta.badge,
             recommended: isRec,
             type: meta.isMuxed ? 'muxed' : 'adaptive_video',
@@ -2498,7 +2766,13 @@
             videoSize: vSize || null,
             audioSize: audioSize || null,
             audioUrl: meta.isMuxed ? null : sniffedAudioUrl,
-            audioItag: meta.isMuxed ? null : sniffedAudioItag
+            audioItag: meta.isMuxed ? null : sniffedAudioItag,
+            audioTrackName: 'Original (Português)',
+            secondaryAudioUrl: isDual ? sniffedSecondaryAudioUrl : null,
+            secondaryAudioItag: isDual ? sniffedSecondaryAudioItag : null,
+            secondaryAudioSize: isDual ? audioSize : 0,
+            secondaryAudioTrackName: isDual ? 'Dublagem Secundária' : null,
+            isDualAudio: isDual
           });
         }
       } catch (e) {
@@ -2515,10 +2789,12 @@
       itagsAdded.add(itag);
 
       const vSize = (videoDuration > 0 && meta.bps) ? Math.round((videoDuration * meta.bps) / 8) : 0;
-      const totalEstSize = vSize + (meta.isMuxed ? 0 : audioSize);
+      const isDual = Boolean(!meta.isMuxed && sniffedSecondaryAudioUrl);
+      const totalEstSize = vSize + (meta.isMuxed ? 0 : audioSize) + (isDual ? audioSize : 0);
+      const dualLabel = isDual ? ' • Dual Áudio' : '';
 
       results.push({
-        quality: meta.quality,
+        quality: `${meta.quality}${dualLabel}`,
         badge: meta.badge,
         recommended: false,
         type: meta.isMuxed ? 'muxed' : 'adaptive_video',
@@ -2530,7 +2806,13 @@
         videoSize: vSize || null,
         audioSize: audioSize || null,
         audioUrl: meta.isMuxed ? null : sniffedAudioUrl,
-        audioItag: meta.isMuxed ? null : sniffedAudioItag
+        audioItag: meta.isMuxed ? null : sniffedAudioItag,
+        audioTrackName: 'Original (Português)',
+        secondaryAudioUrl: isDual ? sniffedSecondaryAudioUrl : null,
+        secondaryAudioItag: isDual ? sniffedSecondaryAudioItag : null,
+        secondaryAudioSize: isDual ? audioSize : 0,
+        secondaryAudioTrackName: isDual ? 'Dublagem Secundária' : null,
+        isDualAudio: isDual
       });
     });
 
@@ -2539,10 +2821,10 @@
       results[0].recommended = true;
     }
 
-    // 4. Add standalone Audio M4A option
+    // 4. Add standalone Audio M4A options
     if (sniffedAudioUrl) {
       results.push({
-        quality: 'Áudio M4A (Alta Fidelidade)',
+        quality: 'Áudio M4A (Original - Alta Fidelidade)',
         badge: 'Áudio M4A',
         recommended: false,
         type: 'audio',
@@ -2552,6 +2834,20 @@
         itag: sniffedAudioItag,
         size: audioSize || null
       });
+
+      if (sniffedSecondaryAudioUrl) {
+        results.push({
+          quality: 'Áudio M4A (Dublagem Secundária - Alta Fidelidade)',
+          badge: 'Áudio M4A',
+          recommended: false,
+          type: 'audio',
+          height: 0,
+          fps: 0,
+          url: sniffedSecondaryAudioUrl,
+          itag: sniffedSecondaryAudioItag,
+          size: audioSize || null
+        });
+      }
     }
 
     if (results.length === 0) return null;
