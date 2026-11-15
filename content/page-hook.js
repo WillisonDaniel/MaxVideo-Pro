@@ -6,6 +6,25 @@
 
   const reportedUrls = new Set();
   window.__maxvideo_sniffedMedia = window.__maxvideo_sniffedMedia || [];
+  window.__maxvideo_drmDetected = false;
+
+  // Intercept EME / DRM key requests (Widevine, PlayReady, ClearKey)
+  try {
+    if (navigator && navigator.requestMediaKeySystemAccess) {
+      const origRMKSA = navigator.requestMediaKeySystemAccess.bind(navigator);
+      navigator.requestMediaKeySystemAccess = function (keySystem, supportedConfigurations) {
+        window.__maxvideo_drmDetected = true;
+        try {
+          window.dispatchEvent(
+            new CustomEvent('MAXVIDEO_DRM_DETECTED', {
+              detail: { keySystem, host: window.location.hostname, timestamp: Date.now() }
+            })
+          );
+        } catch {}
+        return origRMKSA(keySystem, supportedConfigurations);
+      };
+    }
+  } catch {}
 
   function reportMedia(url, platform, extra = {}) {
     if (!url || typeof url !== 'string') return;
@@ -122,7 +141,42 @@
         reportMedia(fullUrl, 'facebook');
       }
     }
-    // 5. Generic direct MP4 / WebM / MKV
+    // 5. TikTok: tiktokcdn.com, byteoversea.com, ibytedtos.com, muscdn.com
+    else if (url.includes('tiktokcdn.com') || url.includes('byteoversea.com') || url.includes('ibytedtos.com') || url.includes('muscdn.com') || (host.includes('tiktok.com') && (url.includes('/video/') || url.includes('.mp4')))) {
+      if (url.includes('.mp4') || url.includes('/tos-') || url.includes('video/tos') || url.includes('x-expires') || url.includes('mime_type=video_mp4')) {
+        const fullUrl = stripByteRangeParams(cleanUrl(url));
+        let videoId = null;
+        const vm = window.location.pathname.match(/\/video\/(\d+)/);
+        if (vm) videoId = vm[1];
+        reportMedia(fullUrl, 'tiktok', { videoId });
+      }
+    }
+    // 6. Reddit: v.redd.it
+    else if (url.includes('v.redd.it')) {
+      const fullUrl = stripByteRangeParams(cleanUrl(url));
+      const m = fullUrl.match(/v\.redd\.it\/([a-zA-Z0-9_-]+)/);
+      const mediaId = m ? m[1] : null;
+      let quality = null;
+      const qm = fullUrl.match(/DASH_(\d+)/i);
+      if (qm) quality = `${qm[1]}p`;
+      const isAudio = fullUrl.toLowerCase().includes('audio');
+      reportMedia(fullUrl, 'reddit', { mediaId, quality, isAudio });
+    }
+    // 7. Twitch: clips-media-assets2.twitch.tv, production.assets.clips.twitchcdn.net, usher.ttvnw.net
+    else if (url.includes('clips-media-assets2.twitch.tv') || url.includes('assets.clips.twitchcdn.net') || (host.includes('twitch.tv') && url.includes('.mp4'))) {
+      const fullUrl = cleanUrl(url);
+      reportMedia(fullUrl, 'twitch', { isClip: true });
+    }
+    else if (url.includes('usher.ttvnw.net') || (host.includes('twitch.tv') && url.includes('.m3u8'))) {
+      const fullUrl = cleanUrl(url);
+      reportMedia(fullUrl, 'twitch', { isHls: true });
+    }
+    // 8. Universal HLS (.m3u8) Playlists across all websites
+    else if (url.includes('.m3u8') && !url.includes('/embed/')) {
+      const fullUrl = cleanUrl(url);
+      reportMedia(fullUrl, 'hls', { isHls: true });
+    }
+    // 9. Generic direct MP4 / WebM / MKV
     else if (url.match(/\.(mp4|webm|mkv|mov)(\?.*)?$/i) && !url.includes('/embed/')) {
       const fullUrl = stripByteRangeParams(cleanUrl(url));
       reportMedia(fullUrl, 'generic');
@@ -190,6 +244,52 @@
         }
       });
     }
+
+    // --- TikTok JSON & API response inspection ---
+    if (requestUrl.includes('tiktok.com') || requestUrl.includes('byteoversea.com') || requestUrl.includes('tiktokcdn.com') || text.includes('playAddr') || text.includes('play_addr')) {
+      const ttMatches = text.match(/https:\\?\/\\?\/[^\s"'<>]*(?:tiktokcdn\.com|byteoversea\.com|ibytedtos\.com)[^\s"'<>]*/g);
+      if (ttMatches) {
+        ttMatches.forEach((m) => {
+          const clean = cleanUrl(m);
+          if (clean.includes('.mp4') || clean.includes('/tos-') || clean.includes('video/tos') || clean.includes('mime_type=video_mp4')) {
+            reportMedia(clean, 'tiktok');
+          }
+        });
+      }
+      try {
+        if (text.startsWith('{') && (text.includes('playAddr') || text.includes('play_addr') || text.includes('downloadAddr'))) {
+          const json = JSON.parse(text);
+          findTikTokUrlsInJson(json);
+        }
+      } catch {}
+    }
+
+    // --- Reddit JSON & API response inspection ---
+    if (requestUrl.includes('reddit.com') || text.includes('v.redd.it')) {
+      const redMatches = text.match(/https:\\?\/\\?\/v\.redd\.it\\?\/[a-zA-Z0-9_-]+\\?\/(?:DASH_[a-zA-Z0-9_.]+|HLSPlaylist\.m3u8)/g);
+      if (redMatches) {
+        redMatches.forEach((m) => {
+          const clean = cleanUrl(m);
+          checkUrl(clean);
+        });
+      }
+      try {
+        if (text.startsWith('{') && (text.includes('fallback_url') || text.includes('hls_url'))) {
+          const json = JSON.parse(text);
+          findRedditUrlsInJson(json);
+        }
+      } catch {}
+    }
+
+    // --- Twitch GQL & Response inspection ---
+    if (requestUrl.includes('twitch.tv') || text.includes('clips-media-assets2.twitch.tv')) {
+      const twClips = text.match(/https:\\?\/\\?\/clips-media-assets2\.twitch\.tv\\?\/[^\s"'<>]+\.mp4[^\s"'<>]*/g);
+      if (twClips) {
+        twClips.forEach((m) => {
+          reportMedia(cleanUrl(m), 'twitch', { isClip: true });
+        });
+      }
+    }
   }
 
   function findTwitterVariantsInJson(obj, currentTweetId = null) {
@@ -249,6 +349,50 @@
     }
   }
 
+  function findTikTokUrlsInJson(obj) {
+    if (!obj || typeof obj !== 'object') return;
+    if (obj.playAddr && typeof obj.playAddr === 'string') {
+      const u = cleanUrl(obj.playAddr);
+      if (!isBlacklistedMedia(u)) reportMedia(u, 'tiktok');
+    }
+    if (obj.downloadAddr && typeof obj.downloadAddr === 'string') {
+      const u = cleanUrl(obj.downloadAddr);
+      if (!isBlacklistedMedia(u)) reportMedia(u, 'tiktok');
+    }
+    if (obj.play_addr && typeof obj.play_addr === 'object') {
+      const urls = obj.play_addr.url_list || [];
+      urls.forEach((raw) => {
+        if (typeof raw === 'string') {
+          const u = cleanUrl(raw);
+          if (!isBlacklistedMedia(u)) reportMedia(u, 'tiktok');
+        }
+      });
+    }
+    for (const key of Object.keys(obj)) {
+      if (typeof obj[key] === 'object') {
+        findTikTokUrlsInJson(obj[key]);
+      }
+    }
+  }
+
+  function findRedditUrlsInJson(obj) {
+    if (!obj || typeof obj !== 'object') return;
+    if (obj.fallback_url && typeof obj.fallback_url === 'string') {
+      checkUrl(cleanUrl(obj.fallback_url));
+    }
+    if (obj.hls_url && typeof obj.hls_url === 'string') {
+      checkUrl(cleanUrl(obj.hls_url));
+    }
+    if (obj.scrubber_media_url && typeof obj.scrubber_media_url === 'string') {
+      checkUrl(cleanUrl(obj.scrubber_media_url));
+    }
+    for (const key of Object.keys(obj)) {
+      if (typeof obj[key] === 'object') {
+        findRedditUrlsInJson(obj[key]);
+      }
+    }
+  }
+
   function shouldInspect(url) {
     if (!url || typeof url !== 'string') return false;
     const lower = url.toLowerCase();
@@ -261,9 +405,46 @@
       lower.includes('facebook.com') ||
       lower.includes('twimg.com') ||
       lower.includes('fbcdn.net') ||
-      lower.includes('cdninstagram.com')
+      lower.includes('cdninstagram.com') ||
+      lower.includes('tiktok.com') ||
+      lower.includes('byteoversea.com') ||
+      lower.includes('tiktokcdn.com') ||
+      lower.includes('reddit.com') ||
+      lower.includes('v.redd.it') ||
+      lower.includes('twitch.tv') ||
+      lower.includes('ttvnw.net') ||
+      lower.includes('.m3u8')
     );
   }
+
+  // Hook HTMLMediaElement & HTMLSourceElement src setters so dynamic videos are captured at runtime
+  try {
+    const origMediaSrcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+    if (origMediaSrcDesc && origMediaSrcDesc.set) {
+      Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+        set: function (val) {
+          if (typeof val === 'string') checkUrl(val);
+          return origMediaSrcDesc.set.call(this, val);
+        },
+        get: origMediaSrcDesc.get,
+        configurable: true,
+        enumerable: true
+      });
+    }
+
+    const origSourceSrcDesc = Object.getOwnPropertyDescriptor(HTMLSourceElement.prototype, 'src');
+    if (origSourceSrcDesc && origSourceSrcDesc.set) {
+      Object.defineProperty(HTMLSourceElement.prototype, 'src', {
+        set: function (val) {
+          if (typeof val === 'string') checkUrl(val);
+          return origSourceSrcDesc.set.call(this, val);
+        },
+        get: origSourceSrcDesc.get,
+        configurable: true,
+        enumerable: true
+      });
+    }
+  } catch {}
 
   // Hook XMLHttpRequest
   try {

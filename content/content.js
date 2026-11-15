@@ -506,11 +506,36 @@
 
   // Sniffed media store from page-hook.js (Main World)
   const sniffedMedia = [];
+  let isDrmDetectedGlobally = false;
+
   window.addEventListener('MAXVIDEO_SNIFFED_MEDIA', (e) => {
     if (e.detail && e.detail.url) {
       sniffedMedia.push(e.detail);
     }
   });
+
+  window.addEventListener('MAXVIDEO_DRM_DETECTED', () => {
+    isDrmDetectedGlobally = true;
+  });
+
+  function isDrmProtected(video) {
+    if (isDrmDetectedGlobally) return true;
+    const host = window.location.hostname;
+    const drmDomains = [
+      'netflix.com',
+      'primevideo.com',
+      'disneyplus.com',
+      'max.com',
+      'hbomax.com',
+      'hulu.com',
+      'peacocktv.com',
+      'paramountplus.com',
+      'tv.apple.com'
+    ];
+    if (drmDomains.some((d) => host.includes(d))) return true;
+    if (video && video.mediaKeys) return true;
+    return false;
+  }
 
   function cleanUrl(rawUrl) {
     if (!rawUrl || typeof rawUrl !== 'string') return '';
@@ -3456,6 +3481,15 @@
     if (host.includes('facebook.com')) {
       return getFacebookTitle(video);
     }
+    if (host.includes('tiktok.com')) {
+      return getTikTokTitle(video);
+    }
+    if (host.includes('reddit.com')) {
+      return getRedditTitle(video);
+    }
+    if (host.includes('twitch.tv')) {
+      return getTwitchTitle(video);
+    }
 
     let raw = (document.title || 'video').trim();
     raw = raw.replace(/\s*[-–|•]\s*(YouTube|Twitch|Vimeo|Netflix|Twitter|X|Facebook|Instagram|Dailymotion).*$/i, '').trim();
@@ -3466,15 +3500,734 @@
     return clean;
   }
 
+  function getTikTokTitle(video) {
+    let username = '';
+    let caption = '';
+
+    const pathMatch = window.location.pathname.match(/@([a-zA-Z0-9_.-]+)/);
+    if (pathMatch) username = pathMatch[1];
+
+    const h1 = document.querySelector('h1[data-e2e="browse-video-desc"], [data-e2e="user-post-item-desc"]');
+    if (h1) caption = (h1.textContent || '').trim().slice(0, 40);
+
+    const parts = ['TikTok'];
+    if (username) parts.push(`@${username}`);
+    if (caption) parts.push(caption);
+    else parts.push(Date.now().toString().slice(-6));
+
+    return parts.join('_').replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_').slice(0, 80);
+  }
+
+  function getRedditTitle(video) {
+    let title = '';
+    const h1 = document.querySelector('h1');
+    if (h1) {
+      title = (h1.textContent || '').trim();
+    }
+    if (!title) {
+      title = (document.title || '').replace(/\s*:\s*r\/.*$/i, '').trim();
+    }
+    const clean = title.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 70);
+    return clean ? `Reddit_${clean}` : `Reddit_Video_${Date.now().toString().slice(-6)}`;
+  }
+
+  function getTwitchTitle(video) {
+    let title = (document.title || '').replace(/\s*-\s*Twitch.*$/i, '').trim();
+    const clean = title.replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 70);
+    return clean ? `Twitch_${clean}` : `Twitch_Video_${Date.now().toString().slice(-6)}`;
+  }
+
+  // -------------------------------------------------------------
+  // Universal Video Extractors & HLS / DASH Downloader Engine
+  // -------------------------------------------------------------
+
+  function extractTikTokVideoUrl(video) {
+    if (!video && !window.location.hostname.includes('tiktok.com')) return null;
+
+    if (video) {
+      if (isValidMediaUrl(video.currentSrc) && !video.currentSrc.startsWith('blob:')) {
+        return cleanUrl(video.currentSrc);
+      }
+      if (isValidMediaUrl(video.src) && !video.src.startsWith('blob:')) {
+        return cleanUrl(video.src);
+      }
+    }
+
+    const ttSniffed = sniffedMedia.filter((m) =>
+      m.platform === 'tiktok' ||
+      (m.url && (m.url.includes('tiktokcdn.com') || m.url.includes('byteoversea.com') || m.url.includes('ibytedtos.com')))
+    );
+    if (ttSniffed.length > 0) {
+      return cleanUrl(ttSniffed[ttSniffed.length - 1].url);
+    }
+
+    const scripts = document.querySelectorAll('script');
+    for (const s of scripts) {
+      const txt = s.textContent || '';
+      if (txt.includes('playAddr') || txt.includes('downloadAddr')) {
+        const m = txt.match(/"(?:playAddr|downloadAddr)"\s*:\s*"([^"]+)"/);
+        if (m && m[1]) {
+          const clean = cleanUrl(m[1]);
+          if (clean.includes('http')) return clean;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function extractRedditVideoFormats(video) {
+    const host = window.location.hostname;
+    if (!host.includes('reddit.com')) return null;
+
+    let mediaId = null;
+    const allUrls = [
+      video?.currentSrc,
+      video?.src,
+      ...(video ? Array.from(video.querySelectorAll('source')).map((s) => s.src) : []),
+      ...sniffedMedia.map((m) => m.url)
+    ].filter(Boolean);
+
+    for (const u of allUrls) {
+      const m = u.match(/v\.redd\.it\/([a-zA-Z0-9_-]+)/);
+      if (m) {
+        mediaId = m[1];
+        break;
+      }
+    }
+
+    if (!mediaId) {
+      const shreddit = video?.closest('shreddit-player') || document.querySelector('shreddit-player');
+      if (shreddit) {
+        const src = shreddit.getAttribute('src') || shreddit.getAttribute('packaged-media-json') || '';
+        const m = src.match(/v\.redd\.it\/([a-zA-Z0-9_-]+)/);
+        if (m) mediaId = m[1];
+      }
+    }
+
+    if (!mediaId) return null;
+
+    const baseUrl = `https://v.redd.it/${mediaId}`;
+    const audioUrl = `${baseUrl}/DASH_AUDIO_128.mp4`;
+    const fallbackAudioUrl = `${baseUrl}/DASH_audio.mp4`;
+
+    return [
+      {
+        quality: '1080p Full HD (com Áudio)',
+        badge: '1080p FHD',
+        recommended: true,
+        type: 'reddit_dash',
+        videoUrl: `${baseUrl}/DASH_1080.mp4`,
+        audioUrl: audioUrl,
+        fallbackAudioUrl: fallbackAudioUrl,
+        mediaId
+      },
+      {
+        quality: '720p HD (com Áudio)',
+        badge: '720p HD',
+        type: 'reddit_dash',
+        videoUrl: `${baseUrl}/DASH_720.mp4`,
+        audioUrl: audioUrl,
+        fallbackAudioUrl: fallbackAudioUrl,
+        mediaId
+      },
+      {
+        quality: '480p SD (com Áudio)',
+        badge: '480p SD',
+        type: 'reddit_dash',
+        videoUrl: `${baseUrl}/DASH_480.mp4`,
+        audioUrl: audioUrl,
+        fallbackAudioUrl: fallbackAudioUrl,
+        mediaId
+      },
+      {
+        quality: '360p SD (com Áudio)',
+        badge: '360p SD',
+        type: 'reddit_dash',
+        videoUrl: `${baseUrl}/DASH_360.mp4`,
+        audioUrl: audioUrl,
+        fallbackAudioUrl: fallbackAudioUrl,
+        mediaId
+      },
+      {
+        quality: 'Apenas Áudio (M4A/MP4)',
+        badge: 'Áudio',
+        type: 'direct',
+        url: audioUrl,
+        mediaId
+      }
+    ];
+  }
+
+  function extractTwitchVideoFormats(video) {
+    const host = window.location.hostname;
+    if (!host.includes('twitch.tv')) return null;
+
+    const formats = [];
+
+    const clipSniffed = sniffedMedia.filter((m) =>
+      m.platform === 'twitch' && (m.isClip || (m.url && m.url.includes('clips-media-assets2.twitch.tv')))
+    );
+    if (clipSniffed.length > 0) {
+      clipSniffed.forEach((c) => {
+        const u = c.url;
+        let badge = 'Clip MP4';
+        if (u.includes('1080')) badge = '1080p FHD';
+        else if (u.includes('720')) badge = '720p HD';
+        else if (u.includes('480')) badge = '480p SD';
+        else if (u.includes('360')) badge = '360p SD';
+
+        formats.push({
+          quality: `Twitch Clip (${badge})`,
+          badge: badge,
+          type: 'direct',
+          url: u,
+          recommended: badge.includes('1080') || badge.includes('720')
+        });
+      });
+    }
+
+    const hlsSniffed = sniffedMedia.filter((m) =>
+      (m.platform === 'twitch' || m.platform === 'hls') && m.isHls && m.url && m.url.includes('ttvnw.net')
+    );
+    if (hlsSniffed.length > 0) {
+      formats.push({
+        quality: 'Twitch Stream / VOD (HLS)',
+        badge: 'HLS Stream',
+        type: 'hls',
+        m3u8Url: hlsSniffed[0].url,
+        recommended: formats.length === 0
+      });
+    }
+
+    return formats.length > 0 ? formats : null;
+  }
+
+  // HLS Master & Media Playlist parser
+  function parseM3u8(text, baseUrl) {
+    if (!text || typeof text !== 'string') return null;
+    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+
+    function resolveUrl(relativeOrAbsolute) {
+      try {
+        return new URL(relativeOrAbsolute, baseUrl).toString();
+      } catch {
+        return relativeOrAbsolute;
+      }
+    }
+
+    const variants = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('#EXT-X-STREAM-INF:')) {
+        const inf = lines[i];
+        const nextUrlLine = lines[i + 1];
+        if (nextUrlLine && !nextUrlLine.startsWith('#')) {
+          let res = 'Auto';
+          let bandwidth = 0;
+          const resMatch = inf.match(/RESOLUTION=(\d+x\d+)/i);
+          if (resMatch) res = resMatch[1];
+          const bwMatch = inf.match(/BANDWIDTH=(\d+)/i);
+          if (bwMatch) bandwidth = parseInt(bwMatch[1], 10);
+
+          variants.push({
+            resolution: res,
+            bandwidth: bandwidth,
+            url: resolveUrl(nextUrlLine)
+          });
+        }
+      }
+    }
+
+    if (variants.length > 0) {
+      variants.sort((a, b) => b.bandwidth - a.bandwidth);
+      return { isMaster: true, variants };
+    }
+
+    const segments = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('#EXTINF:')) {
+        const nextSeg = lines[i + 1];
+        if (nextSeg && !nextSeg.startsWith('#')) {
+          segments.push(resolveUrl(nextSeg));
+        }
+      }
+    }
+
+    return { isMaster: false, segments };
+  }
+
+  async function fetchHlsPlaylistText(url) {
+    try {
+      const resp = await fetch(url, { credentials: 'omit' });
+      if (resp.ok) return await resp.text();
+    } catch {}
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'fetch-hls-playlist', url }, (res) => {
+        if (res && res.success && res.text) resolve(res.text);
+        else resolve(null);
+      });
+    });
+  }
+
+  async function fetchHlsSegmentChunk(segUrl) {
+    try {
+      const resp = await fetch(segUrl, { credentials: 'omit' });
+      if (resp.ok) {
+        const ab = await resp.arrayBuffer();
+        return new Uint8Array(ab);
+      }
+    } catch {}
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'fetch-stream-chunk', url: segUrl }, (res) => {
+        if (res && res.success && res.b64) {
+          const binary = atob(res.b64);
+          const len = binary.length;
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          resolve(bytes);
+        } else {
+          resolve(null);
+        }
+      });
+    });
+  }
+
+  async function downloadHlsStream({ m3u8Url, title, qualityLabel }) {
+    showToast(`📥 Localizando playlist HLS (${qualityLabel || 'Stream'})...`);
+
+    const playlistText = await fetchHlsPlaylistText(m3u8Url);
+    if (!playlistText) {
+      showToast('❌ Não foi possível carregar a playlist HLS do vídeo.');
+      return;
+    }
+
+    const parsed = parseM3u8(playlistText, m3u8Url);
+    if (!parsed) {
+      showToast('❌ Formato de playlist HLS inválido ou não suportado.');
+      return;
+    }
+
+    let segments = [];
+
+    if (parsed.isMaster && parsed.variants.length > 0) {
+      const mediaPlaylistUrl = parsed.variants[0].url;
+      const mediaText = await fetchHlsPlaylistText(mediaPlaylistUrl);
+      if (!mediaText) {
+        showToast('❌ Falha ao carregar segmentos da melhor qualidade HLS.');
+        return;
+      }
+      const mediaParsed = parseM3u8(mediaText, mediaPlaylistUrl);
+      if (!mediaParsed || !mediaParsed.segments || mediaParsed.segments.length === 0) {
+        showToast('❌ Nenhum segmento de vídeo encontrado na playlist.');
+        return;
+      }
+      segments = mediaParsed.segments;
+    } else if (parsed.segments && parsed.segments.length > 0) {
+      segments = parsed.segments;
+    } else {
+      showToast('❌ Nenhum segmento de vídeo localizado na transmissão.');
+      return;
+    }
+
+    const totalSegs = segments.length;
+    showToast(`📥 Baixando vídeo HLS: 0% (0/${totalSegs} partes)...`);
+
+    const downloadedBuffers = new Array(totalSegs);
+    let completedCount = 0;
+    const concurrency = 4;
+    let nextIndex = 0;
+    let lastToastPercent = 0;
+
+    async function worker() {
+      while (nextIndex < totalSegs) {
+        const idx = nextIndex++;
+        const segUrl = segments[idx];
+        let chunk = await fetchHlsSegmentChunk(segUrl);
+        if (!chunk) {
+          chunk = await fetchHlsSegmentChunk(segUrl);
+        }
+        downloadedBuffers[idx] = chunk;
+        completedCount++;
+
+        const currentPct = Math.round((completedCount / totalSegs) * 100);
+        if (currentPct - lastToastPercent >= 20 || completedCount === totalSegs) {
+          lastToastPercent = currentPct;
+          showToast(`📥 Baixando vídeo HLS: ${currentPct}% (${completedCount}/${totalSegs} partes)...`);
+        }
+      }
+    }
+
+    const workers = [];
+    for (let w = 0; w < concurrency; w++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+
+    const validBuffers = downloadedBuffers.filter(Boolean);
+    if (validBuffers.length === 0) {
+      showToast('❌ Falha ao descarregar segmentos do stream.');
+      return;
+    }
+
+    showToast('⚙️ Finalizando e agrupando segmentos de vídeo...');
+
+    let totalLength = 0;
+    for (const b of validBuffers) totalLength += b.length;
+    const merged = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const b of validBuffers) {
+      merged.set(b, offset);
+      offset += b.length;
+    }
+
+    const blob = new Blob([merged], { type: 'video/mp2t' });
+    const blobUrl = URL.createObjectURL(blob);
+    const cleanTitle = (title || 'video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
+    const filename = `${cleanTitle}.ts`;
+
+    showToast(`💾 Salvando arquivo: ${filename}...`);
+    saveUrlAsFile(blobUrl, filename);
+    setTimeout(() => {
+      URL.revokeObjectURL(blobUrl);
+      showToast('✅ Download do vídeo HLS concluído com sucesso!');
+    }, 15000);
+  }
+
+  async function downloadRedditDashStream({ videoUrl, audioUrl, fallbackAudioUrl, title, qualityLabel }) {
+    showToast(`📥 Baixando vídeo do Reddit (${qualityLabel || 'MP4'})...`);
+
+    const videoChunk = await fetchHlsSegmentChunk(videoUrl);
+    if (!videoChunk) {
+      showToast('❌ Não foi possível descarregar o fluxo de vídeo do Reddit.');
+      return;
+    }
+
+    let audioChunk = null;
+    if (audioUrl) {
+      audioChunk = await fetchHlsSegmentChunk(audioUrl);
+      if (!audioChunk && fallbackAudioUrl) {
+        audioChunk = await fetchHlsSegmentChunk(fallbackAudioUrl);
+      }
+    }
+
+    const cleanTitle = (title || 'reddit_video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
+    const filename = `${cleanTitle}.mp4`;
+
+    if (audioChunk) {
+      try {
+        showToast('⚙️ Sincronizando e unindo vídeo e áudio...');
+        const muxedU8 = muxToStandardMp4(videoChunk, audioChunk, {});
+        const blob = new Blob([muxedU8], { type: 'video/mp4' });
+        const blobUrl = URL.createObjectURL(blob);
+        saveUrlAsFile(blobUrl, filename);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+        showToast('✅ Download do Reddit com áudio concluído!');
+        return;
+      } catch (muxErr) {
+        console.warn('Reddit muxer error, falling back to video stream only:', muxErr);
+      }
+    }
+
+    const blob = new Blob([videoChunk], { type: 'video/mp4' });
+    const blobUrl = URL.createObjectURL(blob);
+    saveUrlAsFile(blobUrl, filename);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+    showToast('✅ Download do vídeo do Reddit concluído!');
+  }
+
+  function showUniversalDownloadModal(formats, title, video) {
+    if (!formats || formats.length === 0) {
+      showToast('⚠️ Nenhum formato disponível para download.');
+      return;
+    }
+
+    let modalHost = document.getElementById('__maxvideo_dl_modal_host');
+    if (modalHost) modalHost.remove();
+
+    modalHost = document.createElement('div');
+    modalHost.id = '__maxvideo_dl_modal_host';
+    modalHost.style.cssText = `
+      all: initial;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 0;
+      height: 0;
+      z-index: 2147483647;
+      pointer-events: auto;
+    `;
+    document.body.appendChild(modalHost);
+
+    const shadow = modalHost.attachShadow ? modalHost.attachShadow({ mode: 'open' }) : modalHost;
+
+    let optionsHtml = '';
+    formats.forEach((fmt, idx) => {
+      let badgeClass = 'sd';
+      const bStr = fmt.badge || '';
+      if (fmt.recommended) badgeClass = 'rec';
+      else if (bStr.includes('1080') || bStr.includes('2160') || bStr.includes('1440')) badgeClass = 'fhd';
+      else if (bStr.includes('720')) badgeClass = 'hd';
+      else if (bStr.includes('Áudio') || fmt.type === 'audio') badgeClass = 'audio';
+
+      const isRec = fmt.recommended ? ' recommended' : '';
+      const sizeStr = fmt.size ? ` • ${Math.round(fmt.size / (1024 * 1024))} MB` : '';
+
+      optionsHtml += `
+        <button class="dl-option${isRec}" data-idx="${idx}">
+          <div class="opt-info">
+            <span class="opt-badge ${badgeClass}">${fmt.badge || 'MP4'}</span>
+            <span class="opt-title">${fmt.quality}</span>
+            <span class="opt-size">${sizeStr}</span>
+          </div>
+          <span class="opt-btn-text">Baixar &darr;</span>
+        </button>
+      `;
+    });
+
+    shadow.innerHTML = `
+      <style>
+        .modal-backdrop {
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100vw;
+          height: 100vh;
+          background: rgba(0, 0, 0, 0.78);
+          backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          box-sizing: border-box;
+          z-index: 2147483647;
+        }
+        .modal-box {
+          background: #0f172a;
+          border: 1px solid rgba(255, 255, 255, 0.16);
+          border-radius: 18px;
+          padding: 24px;
+          width: 480px;
+          max-width: 92vw;
+          box-shadow: 0 25px 60px rgba(0, 0, 0, 0.85);
+          color: #f8fafc;
+          animation: popIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          box-sizing: border-box;
+        }
+        @keyframes popIn {
+          from { opacity: 0; transform: scale(0.95); }
+          to { opacity: 1; transform: scale(1); }
+        }
+        .modal-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 8px;
+        }
+        .modal-title {
+          font-size: 16px;
+          font-weight: 700;
+          color: #fff;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .modal-close {
+          background: none;
+          border: none;
+          color: #94a3b8;
+          cursor: pointer;
+          font-size: 24px;
+          line-height: 1;
+          padding: 0 4px;
+        }
+        .modal-close:hover { color: #fff; }
+        .video-name {
+          font-size: 13px;
+          color: #94a3b8;
+          margin-bottom: 18px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .options-list {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          max-height: 55vh;
+          overflow-y: auto;
+        }
+        .dl-option {
+          all: unset;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          background: #1e293b;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          padding: 12px 16px;
+          border-radius: 12px;
+          cursor: pointer;
+          transition: all 0.15s;
+          box-sizing: border-box;
+        }
+        .dl-option:hover {
+          background: #334155;
+          border-color: rgba(99, 102, 241, 0.5);
+          transform: translateY(-1px);
+        }
+        .dl-option.recommended {
+          background: rgba(99, 102, 241, 0.14);
+          border-color: rgba(129, 140, 248, 0.4);
+        }
+        .dl-option.recommended:hover {
+          background: rgba(99, 102, 241, 0.25);
+          border-color: rgba(129, 140, 248, 0.7);
+        }
+        .opt-info {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          overflow: hidden;
+        }
+        .opt-badge {
+          background: #4f46e5;
+          color: #fff;
+          padding: 3px 8px;
+          border-radius: 6px;
+          font-size: 11px;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+        .opt-badge.fhd { background: #2563eb; }
+        .opt-badge.hd { background: #059669; }
+        .opt-badge.sd { background: #64748b; }
+        .opt-badge.audio { background: #d97706; }
+        .opt-badge.rec {
+          background: linear-gradient(135deg, #8b5cf6, #ec4899);
+          box-shadow: 0 0 10px rgba(236, 72, 153, 0.4);
+        }
+        .opt-title {
+          font-size: 13px;
+          font-weight: 600;
+          color: #f1f5f9;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .opt-size {
+          font-size: 11px;
+          color: #94a3b8;
+          white-space: nowrap;
+        }
+        .opt-btn-text {
+          font-size: 12px;
+          font-weight: 600;
+          color: #818cf8;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          white-space: nowrap;
+        }
+        .modal-footer {
+          margin-top: 16px;
+          text-align: center;
+          font-size: 11px;
+          color: #64748b;
+        }
+      </style>
+      <div class="modal-backdrop" id="modalBackdrop">
+        <div class="modal-box" id="modalBox">
+          <div class="modal-header">
+            <div class="modal-title">
+              <svg style="width:20px; height:20px; fill:#818cf8;" viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              <span>Baixar Vídeo</span>
+            </div>
+            <button class="modal-close" id="btnCloseModal">&times;</button>
+          </div>
+          <div class="video-name">${title || 'Vídeo'}</div>
+          <div class="options-list" id="modalOptionsList">
+            ${optionsHtml}
+          </div>
+          <div class="modal-footer">
+            Selecione a qualidade — O download acontecerá em segundo plano
+          </div>
+        </div>
+      </div>
+    `;
+
+    function closeModal() {
+      modalHost.remove();
+    }
+
+    const backdrop = shadow.getElementById('modalBackdrop');
+    if (backdrop) {
+      backdrop.addEventListener('click', (e) => {
+        if (e.target === backdrop) closeModal();
+      });
+    }
+    const btnClose = shadow.getElementById('btnCloseModal');
+    if (btnClose) {
+      btnClose.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeModal();
+      });
+    }
+
+    const buttons = shadow.querySelectorAll('.dl-option');
+    buttons.forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(btn.getAttribute('data-idx'), 10);
+        const chosen = formats[idx];
+
+        // CRUCIAL: Immediately close modal so it is NOT blocking!
+        closeModal();
+
+        // Dispatch background execution with toasts
+        if (chosen.type === 'reddit_dash') {
+          downloadRedditDashStream({
+            videoUrl: chosen.videoUrl,
+            audioUrl: chosen.audioUrl,
+            fallbackAudioUrl: chosen.fallbackAudioUrl,
+            title,
+            qualityLabel: chosen.badge
+          });
+        } else if (chosen.type === 'hls' || chosen.isHls) {
+          downloadHlsStream({
+            m3u8Url: chosen.m3u8Url || chosen.url,
+            title,
+            qualityLabel: chosen.badge
+          });
+        } else if (chosen.url) {
+          const cleanTitle = (title || 'video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
+          const ext = (chosen.type === 'audio' || (chosen.badge && chosen.badge.includes('Áudio'))) ? 'm4a' : 'mp4';
+          const filename = `${cleanTitle} - ${chosen.badge || 'video'}.${ext}`;
+          showToast(`📥 Baixando vídeo (${chosen.badge || 'MP4'})...`);
+          saveUrlAsFile(chosen.url, filename);
+          showToast(`✅ Download iniciado: ${filename}`);
+        }
+      });
+    });
+  }
+
   async function downloadVideo(targetVideo) {
     const video = targetVideo || state.activeVideo || getPrimaryVideo();
-    const title = getCleanVideoTitle(video);
     const host = window.location.hostname;
+
+    // 1. DRM Protection Check (Netflix, Prime, Disney+, etc.)
+    if (isDrmProtected(video)) {
+      showToast('⚠️ Este vídeo possui proteção por DRM (criptografia) e não pode ser baixado.');
+      return;
+    }
+
+    const title = getCleanVideoTitle(video);
 
     // Trigger on-demand media search in main world
     window.dispatchEvent(new CustomEvent('MAXVIDEO_QUERY_PAGE_MEDIA'));
 
-    // On YouTube: Show dedicated native download modal with 1080p, 720p, and Audio
+    // 2. YouTube: dedicated native Innertube engine with dual audio muxer
     if (host.includes('youtube.com') || host.includes('youtu.be')) {
       const videoId = getYouTubeVideoId(video);
       if (videoId) {
@@ -3483,35 +4236,98 @@
       }
     }
 
-    // On Twitter, Facebook, Instagram, and other social media sites:
-    // Direct download with toast notification (no modal, preserving native fast experience)
-    let directUrl = findDirectVideoUrl(video);
-    if (!directUrl) {
-      await new Promise((r) => setTimeout(r, 300));
-      directUrl = findDirectVideoUrl(video);
-    }
-
-    if (!directUrl) {
-      showToast('⚠️ Dê play no vídeo por 2 segundos e tente baixar novamente.');
+    // 3. Reddit: check Reddit DASH video/audio formats
+    const redditFormats = extractRedditVideoFormats(video);
+    if (redditFormats && redditFormats.length > 0) {
+      showUniversalDownloadModal(redditFormats, title, video);
       return;
     }
 
-    const cleanTitle = (title || 'video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
-    const filename = `${cleanTitle}.mp4`;
-
-    showToast('📥 Baixando vídeo (MP4)...');
-    chrome.runtime.sendMessage({
-      action: 'download-video',
-      url: directUrl,
-      filename: filename
-    }, (resp) => {
-      if (resp && resp.success) {
-        showToast('✅ Download do vídeo iniciado!');
-      } else {
-        saveUrlAsFile(directUrl, filename);
+    // 4. Twitch: check Twitch clips and VOD streams
+    const twitchFormats = extractTwitchVideoFormats(video);
+    if (twitchFormats && twitchFormats.length > 0) {
+      if (twitchFormats.length === 1 && twitchFormats[0].type === 'direct') {
+        const cleanTitle = (title || 'twitch_clip').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
+        showToast('📥 Baixando clipe da Twitch (MP4)...');
+        saveUrlAsFile(twitchFormats[0].url, `${cleanTitle}.mp4`);
         showToast('✅ Download iniciado!');
+        return;
       }
-    });
+      showUniversalDownloadModal(twitchFormats, title, video);
+      return;
+    }
+
+    // 5. TikTok: direct MP4 / HD download
+    const ttUrl = extractTikTokVideoUrl(video);
+    if (ttUrl) {
+      const cleanTitle = (title || 'tiktok_video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
+      showToast('📥 Baixando vídeo do TikTok (MP4)...');
+      saveUrlAsFile(ttUrl, `${cleanTitle}.mp4`);
+      showToast('✅ Download iniciado!');
+      return;
+    }
+
+    // 6. Twitter / X, Instagram, Facebook direct extractors
+    let directUrl = findDirectVideoUrl(video);
+    if (directUrl) {
+      const cleanTitle = (title || 'video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
+      const filename = `${cleanTitle}.mp4`;
+      showToast('📥 Baixando vídeo (MP4)...');
+      saveUrlAsFile(directUrl, filename);
+      showToast('✅ Download iniciado!');
+      return;
+    }
+
+    // 7. Generic HLS detection
+    const hlsItems = sniffedMedia.filter((m) => (m.isHls || (m.url && m.url.includes('.m3u8'))) && !m.url.includes('/embed/'));
+    if (hlsItems.length > 0) {
+      const bestHls = hlsItems[hlsItems.length - 1];
+      downloadHlsStream({
+        m3u8Url: bestHls.url,
+        title,
+        qualityLabel: 'HLS'
+      });
+      return;
+    }
+
+    // 8. Generic sniffed video files (.mp4, .webm, .mkv)
+    const validSniffed = sniffedMedia.filter((m) =>
+      m.url && isValidMediaUrl(m.url) && !m.url.includes('googlevideo.com')
+    );
+    if (validSniffed.length > 0) {
+      if (validSniffed.length === 1) {
+        const cleanTitle = (title || 'video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
+        const filename = `${cleanTitle}.mp4`;
+        showToast('📥 Baixando vídeo (MP4)...');
+        saveUrlAsFile(validSniffed[0].url, filename);
+        showToast('✅ Download iniciado!');
+        return;
+      }
+
+      // Multiple formats available -> show Universal Modal
+      const formats = validSniffed.map((item, idx) => ({
+        quality: `Qualidade ${idx + 1} (${item.quality || item.platform || 'MP4'})`,
+        badge: item.quality || 'MP4',
+        type: item.isHls ? 'hls' : 'direct',
+        url: item.url,
+        recommended: idx === 0
+      }));
+      showUniversalDownloadModal(formats, title, video);
+      return;
+    }
+
+    // If still not found, wait briefly and retry once
+    await new Promise((r) => setTimeout(r, 400));
+    directUrl = findDirectVideoUrl(video);
+    if (directUrl) {
+      const cleanTitle = (title || 'video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
+      saveUrlAsFile(directUrl, `${cleanTitle}.mp4`);
+      showToast('✅ Download iniciado!');
+      return;
+    }
+
+    // Fallback advice to user
+    showToast('⚠️ Dê play no vídeo por 2 segundos e tente baixar novamente.');
   }
 
   function toggleStreamRecorder(video, title) {

@@ -708,7 +708,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Clean filename of invalid characters and strip web extensions
         filename = filename.replace(/[\\/*?:"<>|\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim();
         filename = filename.replace(/\.(htm|html|php|asp|aspx)$/i, '');
-        if (!filename.match(/\.(mp4|webm|mkv|mov|m4a|mp3)$/i)) {
+        if (!filename.match(/\.(mp4|webm|mkv|mov|m4a|mp3|ts)$/i)) {
           filename += '.mp4';
         }
 
@@ -758,6 +758,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
         } else {
           sendResponse({ isCleanWindow: false, isFullscreen: false });
+        }
+      } else if (message.action === 'fetch-hls-playlist') {
+        // Background proxy for HLS .m3u8 playlists, avoiding page-level CORS/CSP blocks
+        try {
+          const resp = await fetch(message.url, { cache: 'no-store', credentials: 'omit' });
+          if (!resp.ok) {
+            sendResponse({ success: false, status: resp.status });
+            return;
+          }
+          const text = await resp.text();
+          sendResponse({ success: true, status: resp.status, text });
+        } catch (fErr) {
+          sendResponse({ success: false, error: fErr.message });
         }
       } else if (message.action === 'fetch-stream-chunk') {
         // High-reliability background chunk proxy: completely immune to page-level CORS/CSP restrictions

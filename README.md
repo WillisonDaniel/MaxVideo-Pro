@@ -49,10 +49,12 @@ Um menu elegante em *Shadow DOM* encapsulado surge suavemente ao passar o cursor
 
 ---
 
-### 📥 6. Motor de Mídia & Downloader Integrado (`Alt + D`)
+### 📥 6. Motor Universal de Mídia & Downloader Integrado (`Alt + D`)
+* **Download Universal com Detecção Híbrida:** Detecta automaticamente vídeos em qualquer site da web combinando varredura do DOM com interceptação de fluxos de rede em tempo real.
 * **Multiplexador de MP4 Padrão ISO (Zero-External Dependencies):** Une canais separados de vídeo em alta definição (1080p Full HD / 720p HD) e áudio estéreo em um arquivo MP4 padrão de mercado, com sincronia audiovisual contínua do primeiro ao último segundo.
-* **Compatibilidade Universal de Reprodução:** Gera arquivos compatíveis nativamente com VLC Media Player, Windows Media Player, QuickTime, TVs e suítes de edição.
-* **Download Rápido em Redes Sociais:** Suporte nativo para download direto em diversas plataformas da web com detecção inteligente de títulos.
+* **Suporte Completo a Streams HLS (.m3u8):** Baixa e concatena automaticamente segmentos de transmissões HLS em arquivos prontos para reprodução.
+* **Extratores Otimizados:** Suporte especializado para plataformas populares (como YouTube, Twitter/X, Instagram, Facebook, TikTok, Reddit e Twitch) e mecanismo universal de contingência para qualquer reprodutor HTML5.
+* **Compatibilidade Universal de Reprodução:** Gera arquivos compatíveis nativamente com players de mídia convencionais, TVs e suítes de edição.
 
 ---
 
