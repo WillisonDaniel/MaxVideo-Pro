@@ -29,22 +29,74 @@
     ancestorsLocked: []
   };
 
-  // Load user settings from chrome.storage.local
-  chrome.storage.local.get(
-    {
-      showFloatingHud: true,
-      defaultFitMode: 'contain',
-      rememberSpeed: false,
-      savedSpeed: 1.0
-    },
-    (items) => {
-      state.showHud = items.showFloatingHud;
-      state.fitMode = items.defaultFitMode;
-      if (items.rememberSpeed && items.savedSpeed) {
-        state.speed = items.savedSpeed;
-      }
+  // -------------------------------------------------------------
+  // Extension Health & Safe Messaging (Immune to Context Invalidation)
+  // -------------------------------------------------------------
+
+  function isExtensionValid() {
+    try {
+      return Boolean(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id);
+    } catch {
+      return false;
     }
-  );
+  }
+
+  function safeSendMessage(message, callback) {
+    if (!isExtensionValid()) {
+      if (callback) {
+        try { callback(null); } catch {}
+      }
+      return Promise.resolve(null);
+    }
+
+    try {
+      let cbCalled = false;
+      const wrappedCb = (response) => {
+        if (cbCalled) return;
+        cbCalled = true;
+        let lastErr = null;
+        try { lastErr = chrome.runtime.lastError; } catch {}
+        if (callback) {
+          try { callback(lastErr ? null : response); } catch {}
+        }
+      };
+
+      const p = chrome.runtime.sendMessage(message, wrappedCb);
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {}); // Prevents unhandled promise rejection if context is invalidated
+      }
+      return p;
+    } catch {
+      if (callback) {
+        try { callback(null); } catch {}
+      }
+      return Promise.resolve(null);
+    }
+  }
+
+  // Load user settings safely from chrome.storage.local
+  try {
+    if (isExtensionValid() && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.get(
+        {
+          showFloatingHud: true,
+          defaultFitMode: 'contain',
+          rememberSpeed: false,
+          savedSpeed: 1.0
+        },
+        (items) => {
+          let lastErr = null;
+          try { lastErr = chrome.runtime && chrome.runtime.lastError; } catch {}
+          if (lastErr || !items) return;
+          state.showHud = items.showFloatingHud;
+          state.fitMode = items.defaultFitMode;
+          if (items.rememberSpeed && items.savedSpeed) {
+            state.speed = items.savedSpeed;
+          }
+        }
+      );
+    }
+  } catch {}
 
   // -------------------------------------------------------------
   // Video & Player Container Detection
@@ -488,11 +540,11 @@
   }
 
   function toggleCleanWindow() {
-    chrome.runtime.sendMessage({ action: 'toggle-clean-window' });
+    safeSendMessage({ action: 'toggle-clean-window' });
   }
 
   function toggleFullscreen() {
-    chrome.runtime.sendMessage({ action: 'toggle-fullscreen' });
+    safeSendMessage({ action: 'toggle-fullscreen' });
   }
 
   // -------------------------------------------------------------
@@ -942,7 +994,7 @@
   }
 
   function saveUrlAsFile(url, filename) {
-    chrome.runtime.sendMessage({
+    safeSendMessage({
       action: 'download-video',
       url: url,
       filename: filename
@@ -2177,7 +2229,7 @@
 
       // Background proxy fallback: completely bypasses page-level CORS and CSP
       return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({ action: 'fetch-stream-chunk', url: chunkUrl }, (resp) => {
+        safeSendMessage({ action: 'fetch-stream-chunk', url: chunkUrl }, (resp) => {
           if (signal && signal.aborted) return reject(new Error('Aborted'));
           if (chrome.runtime.lastError) {
             return reject(new Error(chrome.runtime.lastError.message));
@@ -3026,7 +3078,7 @@
 
     // Channel 3: Extension Service Worker Query (with declarativeNetRequest Origin spoofing)
     try {
-      chrome.runtime.sendMessage({
+      safeSendMessage({
         action: 'get-youtube-formats',
         videoId
       }, (resp) => {
@@ -3762,7 +3814,7 @@
       if (resp.ok) return await resp.text();
     } catch {}
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'fetch-hls-playlist', url }, (res) => {
+      safeSendMessage({ action: 'fetch-hls-playlist', url }, (res) => {
         if (res && res.success && res.text) resolve(res.text);
         else resolve(null);
       });
@@ -3778,7 +3830,7 @@
       }
     } catch {}
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'fetch-stream-chunk', url: segUrl }, (res) => {
+      safeSendMessage({ action: 'fetch-stream-chunk', url: segUrl }, (res) => {
         if (res && res.success && res.b64) {
           const binary = atob(res.b64);
           const len = binary.length;
@@ -4376,7 +4428,7 @@
         const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
         const filename = `${title || 'gravacao'}_${Date.now()}.${ext}`;
 
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           action: 'download-video',
           url: downloadUrl,
           filename: filename

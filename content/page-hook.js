@@ -4,6 +4,22 @@
 (function () {
   'use strict';
 
+  const currentHostname = (window.location && window.location.hostname ? window.location.hostname : '').toLowerCase();
+  const ignoredHosts = [
+    'outlook.live.com',
+    'outlook.office.com',
+    'outlook.office365.com',
+    'mail.google.com',
+    'teams.microsoft.com',
+    'teams.live.com',
+    'web.whatsapp.com',
+    'discord.com',
+    'slack.com'
+  ];
+  if (ignoredHosts.some((h) => currentHostname.includes(h))) {
+    return; // Do not patch or monitor email, chat, or enterprise productivity apps
+  }
+
   const reportedUrls = new Set();
   window.__maxvideo_sniffedMedia = window.__maxvideo_sniffedMedia || [];
   window.__maxvideo_drmDetected = false;
@@ -469,24 +485,33 @@
     };
   } catch {}
 
-  // Hook Fetch
+  // Hook Fetch safely (synchronous wrapper returning exact promise without unhandled rejections)
   try {
     const origFetch = window.fetch;
     window.__maxvideo_origFetch = origFetch;
-    window.fetch = async function (input, init) {
-      const url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-      checkUrl(url);
-
-      const response = await origFetch.apply(this, arguments);
-
+    window.fetch = function (input, init) {
       try {
-        if (shouldInspect(url) && response && typeof response.clone === 'function') {
-          const clone = response.clone();
-          clone.text().then((text) => inspectResponseBody(text, url)).catch(() => {});
-        }
+        const url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+        checkUrl(url);
       } catch {}
 
-      return response;
+      const promise = origFetch.apply(this, arguments);
+
+      if (promise && typeof promise.then === 'function') {
+        promise
+          .then((response) => {
+            try {
+              const url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+              if (shouldInspect(url) && response && typeof response.clone === 'function') {
+                const clone = response.clone();
+                clone.text().then((text) => inspectResponseBody(text, url)).catch(() => {});
+              }
+            } catch {}
+          })
+          .catch(() => {}); // Passive tap, never re-throws or alters promise rejection
+      }
+
+      return promise;
     };
   } catch {}
 

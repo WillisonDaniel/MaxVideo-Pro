@@ -37,8 +37,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     activeTab = tabs[0];
-  } catch (err) {
-    console.error('Error querying active tab:', err);
+  } catch {}
+
+  // Safe messaging to active tab with auto-injection fallback if content script was invalidated or not yet injected
+  async function sendTabMessageSafe(action, payload = {}) {
+    if (!activeTab || !activeTab.id) return null;
+    try {
+      return await chrome.tabs.sendMessage(activeTab.id, { action, ...payload });
+    } catch {
+      // If content script is missing or was invalidated by an extension update, attempt injection once
+      try {
+        if (chrome.scripting && chrome.scripting.executeScript) {
+          await chrome.scripting.executeScript({
+            target: { tabId: activeTab.id },
+            files: ['content/content.js']
+          });
+          return await chrome.tabs.sendMessage(activeTab.id, { action, ...payload });
+        }
+      } catch {}
+      return null;
+    }
   }
 
   // Check Window Status (Clean Window / Fullscreen)
@@ -48,14 +66,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       btnCleanWindow.classList.add('active-state');
       cleanWindowTitle.textContent = 'Restaurar Janela Padrão';
     }
-  } catch (err) {
-    console.warn('Could not retrieve window status:', err);
-  }
+  } catch {}
 
   // Check Page Video Info
   if (activeTab && activeTab.id) {
     try {
-      const pageInfo = await chrome.tabs.sendMessage(activeTab.id, { action: 'get-page-video-info' });
+      const pageInfo = await sendTabMessageSafe('get-page-video-info');
       if (pageInfo) {
         const count = pageInfo.count || 0;
         if (count > 0) {
@@ -119,24 +135,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Action: Clean Window (Hide tabs/URL)
   btnCleanWindow.addEventListener('click', async () => {
-    await chrome.runtime.sendMessage({ action: 'toggle-clean-window' });
+    try {
+      await chrome.runtime.sendMessage({ action: 'toggle-clean-window' });
+    } catch {}
     window.close();
   });
 
   // Action: Maximize Video
   btnMaximize.addEventListener('click', async () => {
-    if (!activeTab || !activeTab.id) return;
-    try {
-      const res = await chrome.tabs.sendMessage(activeTab.id, { action: 'toggle-maximize' });
-      if (res && res.isMaximized) {
-        btnMaximize.classList.add('active-state');
-        maximizeTitle.textContent = 'Restaurar Vídeo';
-      } else {
-        btnMaximize.classList.remove('active-state');
-        maximizeTitle.textContent = 'Maximizar Vídeo';
-      }
-    } catch (err) {
-      console.warn('Could not maximize video:', err);
+    const res = await sendTabMessageSafe('toggle-maximize');
+    if (res && res.isMaximized) {
+      btnMaximize.classList.add('active-state');
+      maximizeTitle.textContent = 'Restaurar Vídeo';
+    } else {
+      btnMaximize.classList.remove('active-state');
+      maximizeTitle.textContent = 'Maximizar Vídeo';
     }
     window.close();
   });
@@ -144,96 +157,88 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Action: Download Video
   if (btnDownloadPopup) {
     btnDownloadPopup.addEventListener('click', async () => {
-      if (!activeTab || !activeTab.id) return;
-      try {
-        await chrome.tabs.sendMessage(activeTab.id, { action: 'trigger-download' });
-      } catch (err) {
-        console.warn('Could not trigger download:', err);
-      }
+      await sendTabMessageSafe('trigger-download');
       window.close();
     });
   }
 
   // Action: Fullscreen
   btnFullscreen.addEventListener('click', async () => {
-    await chrome.runtime.sendMessage({ action: 'toggle-fullscreen' });
+    try {
+      await chrome.runtime.sendMessage({ action: 'toggle-fullscreen' });
+    } catch {}
     window.close();
   });
 
   // Action: Picture-in-Picture
   btnPip.addEventListener('click', async () => {
-    if (!activeTab || !activeTab.id) return;
-    try {
-      await chrome.tabs.sendMessage(activeTab.id, { action: 'toggle-pip' });
-    } catch {}
+    await sendTabMessageSafe('toggle-pip');
     window.close();
   });
 
   // Aspect Ratio Pills
   fitModesGroup.addEventListener('click', async (e) => {
     const btn = e.target.closest('.pill-btn');
-    if (!btn || !activeTab || !activeTab.id) return;
+    if (!btn) return;
 
     const mode = btn.getAttribute('data-fit');
     updateActivePill(fitModesGroup, 'data-fit', mode);
-    await chrome.tabs.sendMessage(activeTab.id, { action: 'set-fit-mode', mode });
-    await chrome.storage.local.set({ defaultFitMode: mode });
+    await sendTabMessageSafe('set-fit-mode', { mode });
+    try {
+      await chrome.storage.local.set({ defaultFitMode: mode });
+    } catch {}
   });
 
   // Speed Pills
   speedPills.addEventListener('click', async (e) => {
     const btn = e.target.closest('.pill-btn');
-    if (!btn || !activeTab || !activeTab.id) return;
+    if (!btn) return;
 
     const speed = parseFloat(btn.getAttribute('data-speed'));
     updateActivePill(speedPills, 'data-speed', String(speed));
     speedDisplay.textContent = `${speed}x`;
-    await chrome.tabs.sendMessage(activeTab.id, { action: 'set-speed', speed });
+    await sendTabMessageSafe('set-speed', { speed });
   });
 
   // Audio Boost Pills
   boostPills.addEventListener('click', async (e) => {
     const btn = e.target.closest('.pill-btn');
-    if (!btn || !activeTab || !activeTab.id) return;
+    if (!btn) return;
 
     const boost = parseFloat(btn.getAttribute('data-boost'));
     updateActivePill(boostPills, 'data-boost', String(boost));
     boostDisplay.textContent = `${Math.round(boost * 100)}%`;
-    await chrome.tabs.sendMessage(activeTab.id, { action: 'set-audio-boost', boost });
+    await sendTabMessageSafe('set-audio-boost', { boost });
   });
 
   // Flip & Rotate
   if (btnSnapshotPopup) {
     btnSnapshotPopup.addEventListener('click', async () => {
-      if (!activeTab || !activeTab.id) return;
-      await chrome.tabs.sendMessage(activeTab.id, { action: 'capture-frame' });
+      await sendTabMessageSafe('capture-frame');
     });
   }
 
   btnFlipVideo.addEventListener('click', async () => {
-    if (!activeTab || !activeTab.id) return;
-    await chrome.tabs.sendMessage(activeTab.id, { action: 'toggle-flip' });
+    await sendTabMessageSafe('toggle-flip');
   });
 
   btnRotateVideo.addEventListener('click', async () => {
-    if (!activeTab || !activeTab.id) return;
-    await chrome.tabs.sendMessage(activeTab.id, { action: 'rotate-video' });
+    await sendTabMessageSafe('rotate-video');
   });
 
   // Settings Toggles
   chkShowHud.addEventListener('change', async () => {
     const val = chkShowHud.checked;
-    await chrome.storage.local.set({ showFloatingHud: val });
-    if (activeTab && activeTab.id) {
-      await chrome.tabs.sendMessage(activeTab.id, {
-        action: 'update-settings',
-        showFloatingHud: val
-      });
-    }
+    try {
+      await chrome.storage.local.set({ showFloatingHud: val });
+    } catch {}
+    await sendTabMessageSafe('update-settings', { showFloatingHud: val });
   });
 
   chkRememberSpeed.addEventListener('change', async () => {
-    await chrome.storage.local.set({ rememberSpeed: chkRememberSpeed.checked });
+    try {
+      await chrome.storage.local.set({ rememberSpeed: chkRememberSpeed.checked });
+    } catch {}
   });
 
   function updateActivePill(group, attribute, value) {
