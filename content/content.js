@@ -561,10 +561,25 @@
   let isDrmDetectedGlobally = false;
 
   window.addEventListener('MAXVIDEO_SNIFFED_MEDIA', (e) => {
-    if (e.detail && e.detail.url) {
+    if (e.detail && e.detail.url && !sniffedMedia.some((m) => m.url === e.detail.url)) {
       sniffedMedia.push(e.detail);
     }
   });
+
+  window.addEventListener('MAXVIDEO_SNIFFED_MEDIA_BATCH', (e) => {
+    if (e.detail && Array.isArray(e.detail.media)) {
+      e.detail.media.forEach((item) => {
+        if (item && item.url && !sniffedMedia.some((m) => m.url === item.url)) {
+          sniffedMedia.push(item);
+        }
+      });
+    }
+  });
+
+  // Query main world on startup to ingest any media sniffed before document_idle
+  try {
+    window.dispatchEvent(new CustomEvent('MAXVIDEO_QUERY_PAGE_MEDIA'));
+  } catch {}
 
   window.addEventListener('MAXVIDEO_DRM_DETECTED', () => {
     isDrmDetectedGlobally = true;
@@ -619,28 +634,38 @@
   function isValidMediaUrl(url) {
     if (!url || typeof url !== 'string') return false;
     const lower = url.toLowerCase();
-    // Reject blob, data, and web page URLs
-    if (lower.startsWith('blob:') || lower.startsWith('data:')) return false;
-    if (lower.includes('/embed/') || lower.includes('.htm') || lower.includes('.html') || lower.includes('.php') || lower.includes('/watch?v=')) {
+    if (lower.startsWith('data:')) return false;
+
+    // Never reject valid streaming / media formats (.m3u8, .mp4, .ts, etc.) even if they have /embed/ in the path
+    if (lower.includes('.m3u8') || lower.match(/\.(mp4|webm|mkv|mov|m4v|ts|m4s)(\?.*)?$/i)) {
+      return true;
+    }
+
+    // Reject web page documents
+    if (lower.match(/\.(htm|html|php|asp|aspx)(\?.*)?$/i) || lower.includes('/watch?v=')) {
       return false;
     }
+
     // Reject static branding/promo clips, tracking pixels, and assets
     if (lower.includes('static.cdninstagram.com') || lower.includes('/rsrc.php/') || lower.includes('instagram_branding')) {
       return false;
     }
     if (lower.includes('static.xx.fbcdn.net')) return false;
 
-    // Reject static images
-    if (lower.match(/\.(jpg|jpeg|png|webp|gif|ico|svg)(\?.*)?$/i)) return false;
+    // Reject static images and styles
+    if (lower.match(/\.(jpg|jpeg|png|webp|gif|ico|svg|css|woff|woff2)(\?.*)?$/i)) return false;
 
     // NEVER pass googlevideo directly to chrome.downloads because Google returns 403 Forbidden (1KB corrupt file)
     if (lower.includes('googlevideo.com')) return false;
 
-    // Accept valid direct video URLs
-    if (lower.match(/\.(mp4|webm|mkv|mov|m4v)(\?.*)?$/i)) return true;
+    // Accept valid direct video / CDN URLs
     if (lower.includes('video.twimg.com')) return true;
     if (lower.includes('cdninstagram.com')) return true;
     if (lower.includes('fbcdn.net')) return true;
+    if (lower.includes('tiktokcdn.com') || lower.includes('byteoversea.com')) return true;
+    if (lower.includes('v.redd.it')) return true;
+    if (lower.includes('ttvnw.net') || lower.includes('twitchcdn.net')) return true;
+
     return false;
   }
 
@@ -3543,6 +3568,14 @@
       return getTwitchTitle(video);
     }
 
+    // If running inside an iframe, use parent page title if available
+    if (window.__maxvideo_parentTitle) {
+      let rawP = window.__maxvideo_parentTitle.trim();
+      rawP = rawP.replace(/\s*[-–|•]\s*(YouTube|Twitch|Vimeo|Netflix|Twitter|X|Facebook|Instagram|Dailymotion).*$/i, '').trim();
+      const cleanP = rawP.replace(/[<>:"/\\|?*]/g, '_').trim().slice(0, 80);
+      if (cleanP && cleanP.length > 3) return cleanP;
+    }
+
     let raw = (document.title || 'video').trim();
     raw = raw.replace(/\s*[-–|•]\s*(YouTube|Twitch|Vimeo|Netflix|Twitter|X|Facebook|Instagram|Dailymotion).*$/i, '').trim();
     const clean = raw.replace(/[<>:"/\\|?*]/g, '_').trim().slice(0, 80);
@@ -4265,8 +4298,41 @@
   }
 
   async function downloadVideo(targetVideo) {
-    const video = targetVideo || state.activeVideo || getPrimaryVideo();
+    let video = targetVideo || state.activeVideo || getPrimaryVideo();
     const host = window.location.hostname;
+
+    // Trigger on-demand media search in main world
+    window.dispatchEvent(new CustomEvent('MAXVIDEO_QUERY_PAGE_MEDIA'));
+
+    // Broadcast media query to all embedded child iframes
+    if (window.frames && window.frames.length > 0) {
+      const iframes = document.querySelectorAll('iframe');
+      iframes.forEach((ifr) => {
+        try {
+          ifr.contentWindow.postMessage({ type: '__MAXVIDEO_REQ_CHILD_MEDIA__' }, '*');
+        } catch {}
+      });
+    }
+
+    // Brief wait (150ms) to allow page-hook.js and child iframes to respond and populate sniffedMedia
+    await new Promise((r) => setTimeout(r, 150));
+
+    // If still no video on current frame, try delegating to child iframe
+    if (!video && window.frames && window.frames.length > 0) {
+      const iframes = document.querySelectorAll('iframe');
+      let delegated = false;
+      iframes.forEach((ifr) => {
+        try {
+          ifr.contentWindow.postMessage({ type: '__MAXVIDEO_TRIGGER_DOWNLOAD__' }, '*');
+          delegated = true;
+        } catch {}
+      });
+      if (delegated && sniffedMedia.length === 0) {
+        return; // Child iframe is handling the download directly
+      }
+    }
+
+    video = video || state.activeVideo || getPrimaryVideo();
 
     // 1. DRM Protection Check (Netflix, Prime, Disney+, etc.)
     if (isDrmProtected(video)) {
@@ -4275,9 +4341,6 @@
     }
 
     const title = getCleanVideoTitle(video);
-
-    // Trigger on-demand media search in main world
-    window.dispatchEvent(new CustomEvent('MAXVIDEO_QUERY_PAGE_MEDIA'));
 
     // 2. YouTube: dedicated native Innertube engine with dual audio muxer
     if (host.includes('youtube.com') || host.includes('youtu.be')) {
@@ -4319,9 +4382,13 @@
       return;
     }
 
-    // 6. Twitter / X, Instagram, Facebook direct extractors
+    // 6. Direct Video URL on element
     let directUrl = findDirectVideoUrl(video);
     if (directUrl) {
+      if (directUrl.includes('.m3u8')) {
+        downloadHlsStream({ m3u8Url: directUrl, title, qualityLabel: 'HLS' });
+        return;
+      }
       const cleanTitle = (title || 'video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
       const filename = `${cleanTitle}.mp4`;
       showToast('📥 Baixando vídeo (MP4)...');
@@ -4330,8 +4397,8 @@
       return;
     }
 
-    // 7. Generic HLS detection
-    const hlsItems = sniffedMedia.filter((m) => (m.isHls || (m.url && m.url.includes('.m3u8'))) && !m.url.includes('/embed/'));
+    // 7. Generic HLS detection from sniffedMedia
+    const hlsItems = sniffedMedia.filter((m) => m.isHls || (m.url && m.url.includes('.m3u8')));
     if (hlsItems.length > 0) {
       const bestHls = hlsItems[hlsItems.length - 1];
       downloadHlsStream({
@@ -4342,43 +4409,66 @@
       return;
     }
 
-    // 8. Generic sniffed video files (.mp4, .webm, .mkv)
+    // 8. Generic sniffed video files (.mp4, .webm, .mkv, .ts)
     const validSniffed = sniffedMedia.filter((m) =>
       m.url && isValidMediaUrl(m.url) && !m.url.includes('googlevideo.com')
     );
     if (validSniffed.length > 0) {
       if (validSniffed.length === 1) {
+        const item = validSniffed[0];
+        if (item.url.includes('.m3u8')) {
+          downloadHlsStream({ m3u8Url: item.url, title, qualityLabel: 'HLS' });
+          return;
+        }
         const cleanTitle = (title || 'video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
         const filename = `${cleanTitle}.mp4`;
         showToast('📥 Baixando vídeo (MP4)...');
-        saveUrlAsFile(validSniffed[0].url, filename);
+        saveUrlAsFile(item.url, filename);
         showToast('✅ Download iniciado!');
         return;
       }
 
       // Multiple formats available -> show Universal Modal
       const formats = validSniffed.map((item, idx) => ({
-        quality: `Qualidade ${idx + 1} (${item.quality || item.platform || 'MP4'})`,
-        badge: item.quality || 'MP4',
-        type: item.isHls ? 'hls' : 'direct',
+        quality: `Qualidade ${idx + 1} (${item.quality || item.platform || (item.url.includes('.m3u8') ? 'HLS Stream' : 'MP4')})`,
+        badge: item.quality || (item.url.includes('.m3u8') ? 'HLS' : 'MP4'),
+        type: (item.isHls || item.url.includes('.m3u8')) ? 'hls' : 'direct',
         url: item.url,
+        m3u8Url: item.url,
         recommended: idx === 0
       }));
       showUniversalDownloadModal(formats, title, video);
       return;
     }
 
-    // If still not found, wait briefly and retry once
+    // 9. If still not found, wait briefly and retry once
     await new Promise((r) => setTimeout(r, 400));
     directUrl = findDirectVideoUrl(video);
     if (directUrl) {
+      if (directUrl.includes('.m3u8')) {
+        downloadHlsStream({ m3u8Url: directUrl, title, qualityLabel: 'HLS' });
+        return;
+      }
       const cleanTitle = (title || 'video').replace(/[<>:"/\\|?*]/g, '_').slice(0, 70);
       saveUrlAsFile(directUrl, `${cleanTitle}.mp4`);
       showToast('✅ Download iniciado!');
       return;
     }
 
-    // Fallback advice to user
+    const recheckHls = sniffedMedia.filter((m) => m.isHls || (m.url && m.url.includes('.m3u8')));
+    if (recheckHls.length > 0) {
+      downloadHlsStream({ m3u8Url: recheckHls[recheckHls.length - 1].url, title, qualityLabel: 'HLS' });
+      return;
+    }
+
+    // 10. Intelligent Fallback: If video is playing via MSE Blob, initiate Stream Recording!
+    if (video && (video.src?.startsWith('blob:') || video.currentSrc?.startsWith('blob:') || !video.paused || video.currentTime > 0)) {
+      showToast('🔴 Gravando stream do vídeo em tempo real (MediaRecorder)...');
+      startStreamRecorder(video, title);
+      return;
+    }
+
+    // Fallback advice to user if video is completely unstarted
     showToast('⚠️ Dê play no vídeo por 2 segundos e tente baixar novamente.');
   }
 
@@ -5367,8 +5457,62 @@
       });
       document.documentElement.classList.remove('__maxvideo-body-lock');
       document.body.classList.remove('__maxvideo-body-lock');
+    } else if (event.data.type === '__MAXVIDEO_REQ_CHILD_MEDIA__') {
+      // Child responds with its sniffed media and active video
+      const vid = state.activeVideo || getPrimaryVideo();
+      const directUrl = vid ? findDirectVideoUrl(vid) : null;
+      const mediaList = [...sniffedMedia];
+      if (directUrl && !mediaList.some((m) => m.url === directUrl)) {
+        mediaList.push({ url: directUrl, platform: 'iframe-direct' });
+      }
+      try {
+        if (event.source && typeof event.source.postMessage === 'function') {
+          event.source.postMessage({
+            type: '__MAXVIDEO_RESP_CHILD_MEDIA__',
+            media: mediaList,
+            hasVideo: !!vid
+          }, '*');
+        }
+      } catch {}
+    } else if (event.data.type === '__MAXVIDEO_RESP_CHILD_MEDIA__') {
+      // Parent receives media from child iframe
+      if (Array.isArray(event.data.media)) {
+        event.data.media.forEach((item) => {
+          if (item && item.url && !sniffedMedia.some((m) => m.url === item.url)) {
+            sniffedMedia.push(item);
+          }
+        });
+      }
+    } else if (event.data.type === '__MAXVIDEO_REQ_PARENT_TITLE__') {
+      // Parent provides document title to child iframe
+      try {
+        if (event.source && typeof event.source.postMessage === 'function') {
+          event.source.postMessage({
+            type: '__MAXVIDEO_RESP_PARENT_TITLE__',
+            title: document.title || ''
+          }, '*');
+        }
+      } catch {}
+    } else if (event.data.type === '__MAXVIDEO_RESP_PARENT_TITLE__') {
+      // Child receives parent document title
+      if (event.data.title && typeof event.data.title === 'string') {
+        window.__maxvideo_parentTitle = event.data.title;
+      }
+    } else if (event.data.type === '__MAXVIDEO_TRIGGER_DOWNLOAD__') {
+      // Child iframe handles download for its local video
+      const vid = state.activeVideo || getPrimaryVideo();
+      if (vid) {
+        downloadVideo(vid);
+      }
     }
   });
+
+  // If running inside a subframe, query parent title immediately
+  if (window !== window.top) {
+    try {
+      window.parent.postMessage({ type: '__MAXVIDEO_REQ_PARENT_TITLE__' }, '*');
+    } catch {}
+  }
 
   // -------------------------------------------------------------
   // Message Listener (from Background Service Worker and Popup)

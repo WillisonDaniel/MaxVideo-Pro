@@ -46,18 +46,19 @@
     if (!url || typeof url !== 'string') return;
     url = url.trim();
     const key = `${platform}:${url}`;
-    if (reportedUrls.has(key)) return;
-    reportedUrls.add(key);
-
-    const item = {
-      url,
-      platform,
-      timestamp: Date.now(),
-      ...extra
-    };
-    if (window.__maxvideo_sniffedMedia) {
-      window.__maxvideo_sniffedMedia.push(item);
+    let item = window.__maxvideo_sniffedMedia?.find((m) => m.url === url);
+    if (!item) {
+      item = {
+        url,
+        platform,
+        timestamp: Date.now(),
+        ...extra
+      };
+      if (window.__maxvideo_sniffedMedia) {
+        window.__maxvideo_sniffedMedia.push(item);
+      }
     }
+    reportedUrls.add(key);
 
     try {
       window.dispatchEvent(
@@ -104,14 +105,22 @@
   function isBlacklistedMedia(url) {
     if (!url || typeof url !== 'string') return true;
     const lower = url.toLowerCase();
+    if (lower.startsWith('data:')) return true;
+
+    // Never blacklist valid streaming / video formats (.m3u8, .mp4, .ts, etc.) even if they have /embed/ in the path
+    if (lower.includes('.m3u8') || lower.match(/\.(mp4|webm|mkv|mov|ts|m4s)(\?.*)?$/i)) {
+      return false;
+    }
+
+    // Blacklist web page documents
+    if (lower.match(/\.(htm|html|php|asp|aspx)(\?.*)?$/i)) return true;
+
     // Blacklist static branding/promo clips, tracking pixels, and assets
-    if (lower.startsWith('blob:') || lower.startsWith('data:')) return true;
     if (lower.includes('static.cdninstagram.com')) return true;
     if (lower.includes('/rsrc.php/')) return true;
     if (lower.includes('instagram_branding')) return true;
     if (lower.includes('static.xx.fbcdn.net')) return true;
-    if (lower.includes('/embed/') || lower.includes('.htm') || lower.includes('.html')) return true;
-    if (lower.match(/\.(jpg|jpeg|png|webp|gif|ico|svg)(\?.*)?$/i)) return true;
+    if (lower.match(/\.(jpg|jpeg|png|webp|gif|ico|svg|css|woff|woff2|ttf)(\?.*)?$/i)) return true;
     return false;
   }
 
@@ -188,12 +197,12 @@
       reportMedia(fullUrl, 'twitch', { isHls: true });
     }
     // 8. Universal HLS (.m3u8) Playlists across all websites
-    else if (url.includes('.m3u8') && !url.includes('/embed/')) {
+    else if (url.includes('.m3u8')) {
       const fullUrl = cleanUrl(url);
       reportMedia(fullUrl, 'hls', { isHls: true });
     }
-    // 9. Generic direct MP4 / WebM / MKV
-    else if (url.match(/\.(mp4|webm|mkv|mov)(\?.*)?$/i) && !url.includes('/embed/')) {
+    // 9. Generic direct MP4 / WebM / MKV / MOV / TS
+    else if (url.match(/\.(mp4|webm|mkv|mov|ts)(\?.*)?$/i)) {
       const fullUrl = stripByteRangeParams(cleanUrl(url));
       reportMedia(fullUrl, 'generic');
     }
@@ -201,6 +210,18 @@
 
   function inspectResponseBody(text, requestUrl) {
     if (!text || typeof text !== 'string') return;
+
+    // --- Universal HLS / Streaming Manifest & M3U8 URLs inspection ---
+    if (text.includes('#EXTM3U')) {
+      reportMedia(requestUrl, 'hls', { isHls: true });
+    }
+    const m3u8Matches = text.match(/https?:\\?\/\\?\/[^\s"'<>]+\.m3u8[^\s"'<>]*/g);
+    if (m3u8Matches) {
+      m3u8Matches.forEach((m) => {
+        const clean = cleanUrl(m);
+        reportMedia(clean, 'hls', { isHls: true });
+      });
+    }
 
     // --- Twitter / X GraphQL & API response inspection ---
     if (requestUrl.includes('twitter.com') || requestUrl.includes('x.com') || text.includes('video.twimg.com')) {
@@ -415,6 +436,14 @@
     return (
       lower.includes('graphql') ||
       lower.includes('/api/') ||
+      lower.includes('playlist') ||
+      lower.includes('manifest') ||
+      lower.includes('master') ||
+      lower.includes('stream') ||
+      lower.includes('embed') ||
+      lower.includes('player') ||
+      lower.includes('source') ||
+      lower.includes('video') ||
       lower.includes('twitter.com') ||
       lower.includes('x.com') ||
       lower.includes('instagram.com') ||
@@ -515,9 +544,70 @@
     };
   } catch {}
 
+  // Helper to inspect JWPlayer, Video.js, and web player instances on page
+  function inspectPagePlayerInstances() {
+    try {
+      if (typeof window.jwplayer === 'function') {
+        const player = window.jwplayer();
+        if (player && typeof player.getPlaylist === 'function') {
+          const pl = player.getPlaylist();
+          if (Array.isArray(pl)) {
+            pl.forEach((item) => {
+              if (item.file) checkUrl(item.file);
+              if (Array.isArray(item.sources)) {
+                item.sources.forEach((s) => {
+                  if (s.file) checkUrl(s.file);
+                });
+              }
+            });
+          }
+        }
+      }
+    } catch {}
+
+    try {
+      if (typeof window.videojs === 'function' && typeof window.videojs.getAllPlayers === 'function') {
+        const players = window.videojs.getAllPlayers();
+        players.forEach((p) => {
+          if (p && typeof p.currentSrc === 'function') {
+            const src = p.currentSrc();
+            if (src) checkUrl(src);
+          }
+        });
+      }
+    } catch {}
+  }
+
+  // Hook Hls.js dynamic loader
+  function hookHlsJs() {
+    try {
+      if (window.Hls && window.Hls.prototype && window.Hls.prototype.loadSource && !window.Hls.prototype.__maxvideo_hooked) {
+        window.Hls.prototype.__maxvideo_hooked = true;
+        const origLoadSource = window.Hls.prototype.loadSource;
+        window.Hls.prototype.loadSource = function (url) {
+          if (typeof url === 'string') checkUrl(url);
+          return origLoadSource.apply(this, arguments);
+        };
+      }
+    } catch {}
+  }
+  hookHlsJs();
+  setInterval(hookHlsJs, 2000);
+
   // Listen for active queries from content script (world: ISOLATED)
   window.addEventListener('MAXVIDEO_QUERY_PAGE_MEDIA', () => {
     try {
+      // 1. Immediately emit all accumulated sniffed media in batch to isolated content script
+      if (window.__maxvideo_sniffedMedia && window.__maxvideo_sniffedMedia.length > 0) {
+        window.dispatchEvent(
+          new CustomEvent('MAXVIDEO_SNIFFED_MEDIA_BATCH', {
+            detail: { media: window.__maxvideo_sniffedMedia }
+          })
+        );
+      }
+
+      inspectPagePlayerInstances();
+
       // Do NOT check og:video on Instagram because it holds a static generic 3-second branding clip
       if (!window.location.hostname.includes('instagram.com')) {
         const ogVideo = document.querySelector('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"]');
@@ -526,10 +616,33 @@
         }
       }
 
-      const scripts = document.querySelectorAll('script:not([src])');
+      const scripts = document.querySelectorAll('script');
       scripts.forEach((s) => {
         const txt = s.textContent || '';
-        if (txt.includes('.mp4')) {
+        if (!txt) return;
+
+        // Search for .m3u8 URLs directly in scripts
+        const m3u8Matches = txt.match(/https?:\\?\/\\?\/[^\s"'<>]+\.m3u8[^\s"'<>]*/g);
+        if (m3u8Matches) {
+          m3u8Matches.forEach((m) => checkUrl(cleanUrl(m)));
+        }
+
+        // Search for direct video URLs (.mp4, .webm, .mkv, .mov, .ts)
+        const videoMatches = txt.match(/https?:\\?\/\\?\/[^\s"'<>]+\.(?:mp4|webm|mkv|mov|ts)[^\s"'<>]*/g);
+        if (videoMatches) {
+          videoMatches.forEach((m) => checkUrl(cleanUrl(m)));
+        }
+
+        // Search for jwplayer / player configurations: file: "...", sources: [...]
+        const fileMatches = txt.match(/["']file["']\s*:\s*["']([^"']+)["']/g);
+        if (fileMatches) {
+          fileMatches.forEach((fm) => {
+            const val = fm.match(/:\s*["']([^"']+)["']/);
+            if (val && val[1]) checkUrl(cleanUrl(val[1]));
+          });
+        }
+
+        if (txt.includes('.mp4') || txt.includes('.m3u8')) {
           inspectResponseBody(txt, window.location.href);
         }
       });
