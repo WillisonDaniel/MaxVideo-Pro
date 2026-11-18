@@ -4719,6 +4719,13 @@
     return true;
   }
 
+  function isInstagramStoryVideo(video) {
+    if (!video || !video.isConnected) return false;
+    const host = window.location.hostname;
+    if (!host.includes('instagram.com')) return false;
+    return window.location.pathname.includes('/stories/');
+  }
+
   function isMouseOverVideo(e, v) {
     if (!v || !v.isConnected) return false;
     const r = v.getBoundingClientRect();
@@ -5135,16 +5142,31 @@
     const bar = shadow.querySelector('.hud-bar');
 
     function isOverNativePreviewControls(e) {
-      if (!e || !isYouTubePreviewVideo(video)) return false;
+      if (!e) return false;
       const rect = video.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
-      // Canto superior direito do preview no YouTube (área dos botões de mutar/desmutar, CC e fila)
-      return (
-        e.clientX >= rect.right - 90 &&
-        e.clientX <= rect.right + 10 &&
-        e.clientY >= rect.top - 5 &&
-        e.clientY <= rect.top + 65
-      );
+
+      if (isYouTubePreviewVideo(video)) {
+        // Canto superior direito do preview no YouTube (área dos botões de mutar/desmutar, CC e fila)
+        return (
+          e.clientX >= rect.right - 90 &&
+          e.clientX <= rect.right + 10 &&
+          e.clientY >= rect.top - 5 &&
+          e.clientY <= rect.top + 65
+        );
+      }
+
+      if (isInstagramStoryVideo(video)) {
+        // Cabeçalho nativo do Story no Instagram (barra de progresso, perfil, áudio, pause e "...")
+        return (
+          e.clientX >= rect.left - 4 &&
+          e.clientX <= rect.right + 4 &&
+          e.clientY >= rect.top - 4 &&
+          e.clientY <= rect.top + 54
+        );
+      }
+
+      return false;
     }
 
     function updatePosition() {
@@ -5156,9 +5178,11 @@
       if (rect.width <= 0 || rect.height <= 0) return;
 
       const isYtPreview = isYouTubePreviewVideo(video);
+      const isIgStory = isInstagramStoryVideo(video);
+      const topOffset = isIgStory ? 58 : (isYtPreview ? 8 : 12);
 
       host.style.position = 'fixed';
-      host.style.top = `${Math.max(8, Math.round(rect.top + (isYtPreview ? 8 : 12)))}px`;
+      host.style.top = `${Math.max(8, Math.round(rect.top + topOffset))}px`;
 
       if (isYtPreview) {
         // Exclusivo para previews do YouTube: canto SUPERIOR ESQUERDO para não cobrir o botão de mutar/desmutar
@@ -5166,8 +5190,8 @@
         host.classList.add('is-preview');
         if (bar) bar.classList.add('is-preview');
       } else {
-        // Twitter, Instagram, Facebook e qualquer outro site (ou player principal): canto SUPERIOR DIREITO padrão
-        host.style.left = `${Math.min(window.innerWidth - 230, Math.round(rect.right - 210))}px`;
+        // Twitter, Instagram (incluindo Stories abaixo do cabeçalho), Facebook e qualquer outro site: canto SUPERIOR DIREITO
+        host.style.left = `${Math.max(8, Math.min(window.innerWidth - 230, Math.round(rect.right - 210)))}px`;
         host.classList.remove('is-preview');
         if (bar) bar.classList.remove('is-preview');
       }
